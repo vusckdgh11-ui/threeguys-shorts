@@ -31,7 +31,7 @@ jobs:
           pip install pyinstaller
 
       - name: Test timeline and Windows voice
-        run: python -m unittest -v test_sync
+        run: python -m unittest -v test_sync test_ai
 
       - name: Test actual MP4 render
         env:

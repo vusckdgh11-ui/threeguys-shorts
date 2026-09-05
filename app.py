@@ -2,6 +2,7 @@ import os, sys, re, math, wave, tempfile, subprocess, traceback, requests, hashl
 from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import List
+import ai_editor
 
 import cv2
 import numpy as np
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts"
+APP_NAME = "ThreeGuys Shorts V4 · AI 영상 편집"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -35,6 +36,10 @@ class Segment:
     line: str = ""
     play_duration: float = 0.0
     voice_duration: float = 0.0
+    visual_description: str = ""
+    selection_reason: str = ""
+    visual_evidence: str = ""
+    scene_id: str = ""
 
     @property
     def source_duration(self):
@@ -67,184 +72,12 @@ def get_video_duration(path):
     return frames / fps if frames > 0 and fps > 0 else 0.0
 
 
-def frame_score(prev, frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    sharp = cv2.Laplacian(gray, cv2.CV_64F).var()
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    sat = float(np.mean(hsv[:, :, 1]))
-    bright = float(np.mean(gray))
-    contrast = float(np.std(gray))
-    motion = 0.0
-    if prev is not None:
-        pg = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
-        motion = float(np.mean(cv2.absdiff(pg, gray)))
-    exposure_penalty = 0.35 if bright < 18 or bright > 238 else 1.0
-    return exposure_penalty * (0.32 * min(sharp, 700) + 2.3 * motion + 0.35 * sat + 0.5 * contrast)
 
 
-def candidate_segments(path, seg_len=4.0, sample_step=1.0):
-    dur = get_video_duration(path)
-    if dur <= 0.5:
-        return []
-    cap = cv2.VideoCapture(path)
-    prev, samples, t = None, [], 0.0
-    while t < dur:
-        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-        ok, frame = cap.read()
-        if not ok:
-            t += sample_step
-            continue
-        h, w = frame.shape[:2]
-        scale = 360.0 / max(h, w)
-        if scale < 1:
-            frame = cv2.resize(frame, (max(2, int(w * scale)), max(2, int(h * scale))))
-        samples.append((t, frame_score(prev, frame)))
-        prev = frame
-        t += sample_step
-    cap.release()
-    samples.sort(key=lambda x: x[1], reverse=True)
-    out, occupied = [], []
-    for t, sc in samples:
-        start = max(0.0, min(t - seg_len / 2, max(0.0, dur - seg_len)))
-        end = min(dur, start + seg_len)
-        if end - start < 1.4:
-            continue
-        if sc < 8 or any(start < b and end > a for a, b in occupied):
-            continue
-        occupied.append((start, end))
-        out.append(Segment(path, start, end, sc))
-        if len(out) >= max(2, int(dur // 7) + 1):
-            break
-    return out
 
 
-def choose_timeline(paths, target):
-    paths = sorted(paths, key=natural_key)
-    allc = []
-    for i, p in enumerate(paths):
-        for c in candidate_segments(p, seg_len=3.8 if target <= 40 else (4.2 if target <= 50 else 4.6)):
-            allc.append((i, c))
-    if not allc:
-        return []
-
-    per_clip = {}
-    for i, c in allc:
-        per_clip.setdefault(i, []).append(c)
-    picked = []
-    for i in range(len(paths)):
-        vals = sorted(per_clip.get(i, []), key=lambda s: s.score, reverse=True)
-        if vals:
-            picked.append((i, vals[0]))
-
-    seen = {(i, round(c.start, 2)) for i, c in picked}
-    total = sum(c.source_duration for _, c in picked)
-    for i, c in sorted(allc, key=lambda x: x[1].score, reverse=True):
-        if total >= target:
-            break
-        key = (i, round(c.start, 2))
-        if key in seen:
-            continue
-        picked.append((i, c)); seen.add(key); total += c.source_duration
-
-    picked.sort(key=lambda x: (x[0], x[1].start))
-    result, acc = [], 0.0
-    for _, c in picked:
-        if acc >= target:
-            break
-        left = target - acc
-        if c.source_duration > left:
-            c.end = c.start + left
-        result.append(c)
-        acc += c.source_duration
-    return result
 
 
-def make_script(description: str, segs: List[Segment], style="자극적"):
-    """Timeline-first script. One compact line per selected cut."""
-    desc = description.strip() or "특수청소 현장"
-    banks = {
-        "강한 자극형": [
-            f"{desc}. 문을 열자마자 분위기가 심상치 않았습니다.",
-            "겉으로 보이는 것보다 상황은 더 깊었습니다.",
-            "보이는 흔적을 따라 오염 범위를 먼저 확인합니다.",
-            "놓치기 쉬운 틈까지 확인하자 흔적이 이어집니다.",
-            "이제 전용 약품으로 남은 오염을 반응시켜 봅니다.",
-            "한 번 닦았다고 끝? 반응이 남으면 다시 처리합니다.",
-            "가구 주변과 모서리까지 끝까지 확인합니다.",
-            "대충 넘기면 냄새와 흔적이 다시 남을 수 있습니다.",
-            "마지막으로 남은 오염이 없는지 다시 점검합니다.",
-            "이런 곳까지 누가 청소하냐고요? 저희가 합니다.",
-            "쓰리가이즈 특수청소. 24시간 상담 가능합니다."
-        ],
-        "자극적": [
-            f"{desc}. 현장에 들어가자마자 심상치 않은 흔적이 보였습니다.",
-            "그런데 눈에 보이는 게 전부가 아니었습니다.",
-            "오염이 어디까지 번졌는지 하나씩 확인합니다.",
-            "가구 주변과 틈새까지 따라가며 범위를 찾습니다.",
-            "전용 약품을 뿌려 남아 있는 오염을 확인합니다.",
-            "반응이 남는 부분은 다시 처리합니다.",
-            "놓치기 쉬운 부분까지 반복해서 확인합니다.",
-            "대충 닦고 끝내면 냄새와 흔적이 남을 수 있습니다.",
-            "끝까지 확인한 뒤에야 작업을 마무리합니다.",
-            "이런 곳까지 누가 청소하냐고요? 저희가 합니다.",
-            "쓰리가이즈 특수청소. 24시간 상담 가능합니다."
-        ],
-        "스토리형": [
-            f"이번 의뢰는 {desc}였습니다.",
-            "현장에 도착해 먼저 전체 상태부터 살펴봤습니다.",
-            "보이는 흔적을 따라 안쪽 상황도 확인합니다.",
-            "가구와 주변을 따라 오염 범위를 찾아갑니다.",
-            "이제 전용 약품으로 남아 있는 오염을 확인합니다.",
-            "반응이 나타나는 곳은 반복해서 처리합니다.",
-            "작은 틈과 모서리도 다시 살펴봅니다.",
-            "처음보다 현장이 조금씩 정리되기 시작합니다.",
-            "마지막으로 남은 부분이 없는지 점검합니다.",
-            "이렇게 현장 하나를 마무리했습니다.",
-            "쓰리가이즈 특수청소. 필요한 순간 연락주세요."
-        ],
-        "정보형": [
-            f"{desc}. 이런 현장은 오염 범위 확인이 먼저입니다.",
-            "겉으로 보이는 부분만 닦아서는 부족할 수 있습니다.",
-            "주변과 틈새까지 오염이 번졌는지 확인합니다.",
-            "상태에 맞는 전용 약품과 작업 방법을 선택합니다.",
-            "약품 반응으로 남아 있는 오염을 확인합니다.",
-            "필요한 부분은 반복 처리합니다.",
-            "놓치기 쉬운 모서리도 다시 점검합니다.",
-            "작업 후에는 전체 공간을 다시 확인합니다.",
-            "특수청소는 제거뿐 아니라 확인 과정도 중요합니다.",
-            "전문적인 처리가 필요한 이유입니다.",
-            "쓰리가이즈 특수청소. 24시간 상담 가능합니다."
-        ],
-        "차분한 전문형": [
-            f"{desc}. 현장 상태를 확인한 뒤 작업 범위를 정했습니다.",
-            "먼저 눈에 보이는 오염과 주변 상태를 점검합니다.",
-            "오염이 이어진 부분을 따라 범위를 확인합니다.",
-            "가구 주변과 틈새도 빠짐없이 살펴봅니다.",
-            "상태에 맞는 전용 약품으로 처리합니다.",
-            "처리 후 반응을 확인하고 필요한 곳은 반복 작업합니다.",
-            "잔여 오염이 없는지 세부 구간을 다시 점검합니다.",
-            "현장에 맞는 절차로 차근차근 마무리합니다.",
-            "마지막으로 전체 상태를 확인합니다.",
-            "안전하고 꼼꼼한 처리가 필요한 현장이었습니다.",
-            "쓰리가이즈 특수청소. 24시간 상담 가능합니다."
-        ]
-    }
-    templates = banks.get(style, banks["자극적"])
-    n = len(segs)
-    lines = []
-    for i in range(n):
-        if i == 0:
-            line = templates[0]
-        elif i == n - 1:
-            line = templates[-1]
-        else:
-            # map middle cuts across the middle script bank instead of simple cycling
-            mid = templates[1:-1]
-            pos = (i - 1) / max(1, n - 2)
-            idx = min(len(mid) - 1, int(round(pos * (len(mid) - 1))))
-            line = mid[idx]
-        lines.append(line)
-    return lines
 
 
 # ---------------- TTS providers ----------------
@@ -510,16 +343,53 @@ def render_video(segs: List[Segment], out_mp4, provider, voice_data, api_key, vo
 
 
 
-class AnalyzeWorker(QThread):
-    done = Signal(object); failed = Signal(str); status = Signal(int, str)
-    def __init__(self, paths, target):
-        super().__init__(); self.paths = list(paths); self.target = target
+
+
+def ai_segments(paths, target, key, model, brief, style, step, progress):
+    client=ai_editor.VisionClient(key,model)
+    scenes=ai_editor.analyze_sources(paths,client,brief,step,progress)
+    progress(75,'AI가 내용과 중복을 고려해 타임라인을 정리하는 중...')
+    cuts=ai_editor.plan_timeline(scenes,target,client,brief)
+    progress(85,'선택한 컷의 실제 프레임을 다시 보고 대본 작성 중...')
+    lines=ai_editor.write_script(cuts,client,brief,style)
+    return [Segment(c.path,c.start,c.end,c.confidence*100,line['text'],
+                    visual_description=c.description,selection_reason=c.reason,
+                    visual_evidence=line['visual_evidence'],scene_id=c.scene_id)
+            for c,line in zip(cuts,lines)]
+
+
+class AIEditWorker(QThread):
+    done=Signal(object); failed=Signal(str); status=Signal(int,str)
+    def __init__(self, options, render_options=None):
+        super().__init__(); self.options=options; self.render_options=render_options
     def run(self):
         try:
-            self.status.emit(10, "영상 길이와 장면 변화 분석 중...")
-            self.done.emit(choose_timeline(self.paths, self.target))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+            scale=0.5 if self.render_options else 1
+            segs=ai_segments(*self.options,progress=lambda p,s:self.status.emit(int(p*scale),s))
+            if self.render_options:
+                render_video(segs,**self.render_options,progress=lambda p,s:self.status.emit(50+int(p*0.5),s))
+            self.done.emit(segs)
+        except Exception as exc:
+            # Do not log request objects, frames, headers or keys.
+            self.failed.emit(str(exc))
+        finally:
+            self.options=None; self.render_options=None
+
+
+class AIScriptWorker(QThread):
+    done=Signal(object); failed=Signal(str)
+    def __init__(self,segs,key,model,brief,style):
+        super().__init__(); self.segs=[replace(s) for s in segs]
+        self.key,self.model,self.brief,self.style=key,model,brief,style
+    def run(self):
+        try:
+            cuts=[ai_editor.Scene(s.scene_id,s.path,s.start,s.end,s.visual_description,'','',s.selection_reason,s.score/100) for s in self.segs]
+            lines=ai_editor.write_script(cuts,ai_editor.VisionClient(self.key,self.model),self.brief,self.style)
+            for s,line in zip(self.segs,lines):
+                s.line=line['text']; s.visual_evidence=line['visual_evidence']; s.voice_duration=s.play_duration=0
+            self.done.emit(self.segs)
+        except Exception as exc: self.failed.emit(str(exc))
+        finally: self.key=''
 
 
 class RenderWorker(QThread):
@@ -725,7 +595,7 @@ class Main(QMainWindow):
         title=QLabel("쓰리가이즈 쇼츠 자동제작"); title.setStyleSheet("font-size:24px;font-weight:700"); outer.addWidget(title)
         sub=QLabel("영상 분석 → 실제 컷 확정 → 컷별 대본 → 컷별 TTS → 음성 길이에 영상/자막 동기화 → MP4")
         sub.setStyleSheet("color:#666"); outer.addWidget(sub)
-        limitation=QLabel("장면 선택은 밝기·선명도·움직임 기반 휴리스틱입니다. 의미 인식은 없으며 대본은 수정 가능한 템플릿 초안입니다.")
+        limitation=QLabel("AI가 시간별 영상 프레임을 인식 → 필요한 컷 정리 → 선택 컷을 다시 보고 대본 작성 → 컷별 TTS·자막·MP4")
         limitation.setWordWrap(True); outer.addWidget(limitation)
 
         splitter=QSplitter(Qt.Horizontal); splitter.setChildrenCollapsible(False); outer.addWidget(splitter,1)
@@ -742,7 +612,20 @@ class Main(QMainWindow):
         g2=QGroupBox("2) 현장 설명 / 길이"); f=QFormLayout(g2)
         self.desc=QLineEdit(); self.desc.setPlaceholderText("예: 모텔 혈흔 특수청소, 혈흔 제거 약품 사용"); f.addRow("현장 설명",self.desc)
         self.target=QComboBox(); self.target.addItems(["40","50","60"]); self.target.setCurrentText("50"); f.addRow("목표 길이",self.target)
-        self.analyze=QPushButton("1. 영상 분석 + 쓸 장면 선택"); self.analyze.clicked.connect(self.do_analyze); f.addRow(self.analyze); left.addWidget(g2)
+        self.analyze=QPushButton("1. AI 영상 인식 + 컷·대본 만들기"); self.analyze.clicked.connect(self.do_analyze); f.addRow(self.analyze); left.addWidget(g2)
+
+        ga=QGroupBox("영상 인식 AI 연결"); fa=QFormLayout(ga)
+        self.ai_key=QLineEdit(); self.ai_key.setEchoMode(QLineEdit.Password)
+        self.ai_key.setPlaceholderText("OpenAI API 키 (Typecast 키와 별개)")
+        self.ai_key.setText(unprotect_secret(self.settings.value('vision_key_dpapi','')))
+        fa.addRow("AI API 키",self.ai_key)
+        self.ai_model=QLineEdit(self.settings.value('vision_model',ai_editor.DEFAULT_MODEL)); fa.addRow("AI 모델",self.ai_model)
+        self.sample_step=QComboBox(); self.sample_step.addItem('정밀 · 0.5초마다',0.5); self.sample_step.addItem('기본 · 1초마다',1.0); self.sample_step.addItem('절약 · 2초마다',2.0); self.sample_step.setCurrentIndex(1)
+        fa.addRow("분석 간격",self.sample_step)
+        ai_note=QLabel("분석 버튼을 누르면 영상 프레임과 설명이 OpenAI API로 전송되며 API 사용료가 발생합니다. 원본 음성은 분석하지 않습니다. 짧은 동작은 놓칠 수 있습니다.")
+        ai_note.setWordWrap(True); fa.addRow(ai_note)
+        self.ai_key_status=QLabel('키는 Windows 암호화 저장만 사용합니다.'); self.ai_key_status.setWordWrap(True); fa.addRow(self.ai_key_status)
+        forget=QPushButton('AI 키 저장 삭제'); forget.clicked.connect(self.forget_ai_key); fa.addRow(forget); left.addWidget(ga)
 
         gt=QGroupBox("3) TTS 공급자 / 목소리"); ft=QFormLayout(gt)
         self.provider=QComboBox(); self.provider.addItems(["Windows 기본 음성","Google 무료(gTTS)","Typecast"]); self.provider.currentTextChanged.connect(self.provider_changed); ft.addRow("TTS",self.provider)
@@ -774,7 +657,7 @@ class Main(QMainWindow):
         right_scroll=QScrollArea(); right_scroll.setWidgetResizable(True); right_scroll.setWidget(right_wrap); right_scroll.setMinimumWidth(360); splitter.addWidget(right_scroll)
 
         g4=QGroupBox("선택된 타임라인 — 한 행 = 한 장면 = 한 대본 = 한 TTS"); gr=QVBoxLayout(g4)
-        self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(["#","파일","시작","원본컷","동기화컷","TTS","대본"]); self.table.horizontalHeader().setStretchLastSection(True); self.table.setMinimumHeight(300); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); gr.addWidget(self.table); right.addWidget(g4)
+        self.table=QTableWidget(0,9); self.table.setHorizontalHeaderLabels(["#","파일","시작","원본컷","동기화컷","TTS","AI 인식 내용","선택 이유","대본"]); self.table.horizontalHeader().setStretchLastSection(True); self.table.setMinimumHeight(300); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); gr.addWidget(self.table); right.addWidget(g4)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         trim_row=QHBoxLayout()
         trim_btn=QPushButton("선택 컷 시작/끝 수정"); trim_btn.clicked.connect(self.trim_cut); trim_row.addWidget(trim_btn)
@@ -786,10 +669,12 @@ class Main(QMainWindow):
         sr=QHBoxLayout(); sr.addWidget(QLabel("대본 스타일")); self.script_style=QComboBox(); self.script_style.addItems(["강한 자극형","자극적","스토리형","정보형","차분한 전문형"]); self.script_style.setCurrentText("자극적"); sr.addWidget(self.script_style,1); gs.addLayout(sr)
         cr=QHBoxLayout(); cr.addWidget(QLabel("자막 스타일")); self.caption_style=QComboBox(); self.caption_style.addItems(["쇼츠 굵은 흰색+검정외곽선","핵심어 노랑 강조","핵심어 빨강 강조","깔끔한 흰색","검정 박스형"]); cr.addWidget(self.caption_style,1); gs.addLayout(cr)
         self.script=QTextEdit(); self.script.setMinimumHeight(220); self.script.setPlaceholderText("영상 분석 후 대본 만들기를 누르세요. 한 줄이 한 장면입니다."); gs.addWidget(self.script)
-        self.script_btn=QPushButton("2. 선택된 장면 기준 대본 만들기"); self.script_btn.setEnabled(False); self.script_btn.clicked.connect(self.do_script); gs.addWidget(self.script_btn)
+        self.script_btn=QPushButton("2. 현재 컷을 AI가 다시 보고 대본 작성"); self.script_btn.setEnabled(False); self.script_btn.clicked.connect(self.do_script); gs.addWidget(self.script_btn)
         right.addWidget(g5)
 
         self.render=QPushButton("3. 컷별 TTS 동기화 후 MP4 자동 제작"); self.render.setEnabled(False); self.render.clicked.connect(self.do_render); self.render.setMinimumHeight(50); self.render.setStyleSheet("font-size:17px;font-weight:700"); right.addWidget(self.render); right.addStretch(1)
+        self.auto_btn=QPushButton("AI 영상 인식부터 MP4까지 한 번에"); self.auto_btn.setMinimumHeight(52)
+        self.auto_btn.clicked.connect(self.do_auto); outer.addWidget(self.auto_btn)
 
         self.prog=QProgressBar(); outer.addWidget(self.prog); self.status=QLabel("준비됨"); outer.addWidget(self.status)
         splitter.setSizes([360,440,720]); splitter.setStretchFactor(0,0); splitter.setStretchFactor(1,0); splitter.setStretchFactor(2,1)
@@ -900,7 +785,7 @@ class Main(QMainWindow):
 
     def busy(self):
         return any(getattr(self, name, None) is not None and getattr(self, name).isRunning()
-                   for name in ('worker','rworker','voice_worker'))
+                   for name in ('worker','rworker','voice_worker','ai_worker','script_worker'))
 
     def closeEvent(self,event):
         if self.busy():
@@ -927,6 +812,8 @@ class Main(QMainWindow):
         except ValueError:
             QMessageBox.warning(self,"컷 범위","원본 안의 시작초, 끝초를 입력하세요."); return
         s.start,s.end=start,end; s.play_duration=0; s.voice_duration=0
+        s.line=''; s.visual_evidence=''; self.script.setPlainText('\n'.join(s.line for s in self.segs)); self.render.setEnabled(False)
+        self.status.setText('컷 범위가 바뀌었습니다. AI 대본을 다시 작성하세요.')
         self.refresh_table(); self.show_preview_segment(row)
 
     def delete_cuts(self):
@@ -947,8 +834,58 @@ class Main(QMainWindow):
         if self.busy(): return
         if not self.paths:
             QMessageBox.warning(self,"확인","먼저 원본 영상을 추가하세요."); return
-        self.script_btn.setEnabled(False); self.render.setEnabled(False); self.script.clear(); self.segs=[]; self.analyze.setEnabled(False)
-        self.worker=AnalyzeWorker(self.paths,int(self.target.currentText())); self.worker.status.connect(self.set_status); self.worker.done.connect(self.analyzed); self.worker.failed.connect(self.fail); self.worker.start()
+        key=self.get_ai_key()
+        if not key: return
+        self.start_ai(key)
+
+    def get_ai_key(self):
+        key=self.ai_key.text().strip()
+        if not key:
+            QMessageBox.warning(self,'영상 인식 AI','OpenAI API 키가 필요합니다. 채팅이 아닌 이 프로그램의 AI API 키 칸에 입력하세요.'); return ''
+        encrypted=protect_secret(key)
+        self.settings.remove('vision_key_dpapi')
+        if encrypted:
+            self.settings.setValue('vision_key_dpapi',encrypted); self.ai_key_status.setText('AI 키를 Windows 암호화 저장했습니다.')
+        else: self.ai_key_status.setText('이 환경에서는 암호화 저장이 불가하여 이번 실행 메모리에서만 사용합니다.')
+        self.settings.setValue('vision_model',self.ai_model.text().strip()); self.settings.sync()
+        return key
+
+    def forget_ai_key(self):
+        self.ai_key.clear(); self.settings.remove('vision_key_dpapi'); self.settings.sync(); self.ai_key_status.setText('저장된 AI 키를 삭제했습니다.')
+
+    def set_edit_busy(self,on):
+        self.analyze.setEnabled(not on); self.auto_btn.setEnabled(not on)
+        self.script_btn.setEnabled(not on and bool(self.segs)); self.render.setEnabled(not on and bool(self.segs) and all(s.line for s in self.segs))
+        self.script.setReadOnly(on)
+
+    def start_ai(self,key,render_options=None):
+        self.invalidate_timeline(); self.set_edit_busy(True)
+        self.auto_output=render_options['out_mp4'] if render_options else ''
+        options=(list(self.paths),int(self.target.currentText()),key,self.ai_model.text().strip(),self.desc.text(),self.script_style.currentText(),self.sample_step.currentData())
+        self.ai_worker=AIEditWorker(options,render_options)
+        self.ai_worker.status.connect(self.set_status); self.ai_worker.done.connect(self.ai_finished); self.ai_worker.failed.connect(self.fail); self.ai_worker.start()
+
+    def ai_finished(self,segs):
+        self.segs=segs; self.script.setPlainText('\n'.join(s.line for s in segs)); self.set_edit_busy(False)
+        self.refresh_table(); self.preview_slider.setRange(0,max(0,len(segs)-1)); self.show_preview_segment(0)
+        self.set_status(100,f'AI 영상 인식·컷 정리·장면 근거 대본 완료 — {len(segs)}개 컷')
+        if self.auto_output:
+            QMessageBox.information(self,'AI 자동 제작 완료',f'MP4를 저장했습니다.\n{self.auto_output}')
+
+    def do_auto(self):
+        if self.busy(): return
+        if not self.paths: QMessageBox.warning(self,'영상','원본 영상을 먼저 추가하세요.'); return
+        key=self.get_ai_key()
+        if not key: return
+        if not self.voice.count(): QMessageBox.warning(self,'TTS','TTS 음성을 먼저 선택하세요.'); return
+        if self.provider.currentText()=='Typecast' and not self.api_key.text().strip():
+            QMessageBox.warning(self,'TTS','Typecast API 키를 입력하세요.'); return
+        out,_=QFileDialog.getSaveFileName(self,'AI 완성 MP4 저장','ThreeGuys_AI_Shorts.mp4','MP4 (*.mp4)')
+        if not out: return
+        options=dict(out_mp4=out,provider=self.provider.currentText(),voice_data=self.voice.currentData(),api_key=self.api_key.text().strip(),voice_rate=self.rate.value(),
+            logo_path=self.logo,logo_w=self.lw.value(),logo_x=self.lx.value(),logo_y=self.ly.value(),effects=self.effects.isChecked(),banner=self.banner.isChecked(),
+            caption_style=self.caption_style.currentText(),cap_x=self.cap_x,cap_y=self.cap_y,cap_size=self.cap_size)
+        self.start_ai(key,options)
 
     def analyzed(self,segs):
         self.analyze.setEnabled(True); self.segs=segs; self.refresh_table(); self.preview_slider.setRange(0,max(0,len(segs)-1)); self.preview_slider.setValue(0); self.show_preview_segment(0); self.script_btn.setEnabled(bool(segs)); self.set_status(100,f"{len(segs)}개 컷 선택 완료. 이제 컷 기준 대본을 만드세요.")
@@ -959,16 +896,25 @@ class Main(QMainWindow):
                                  + (f"TTS 동기화 {sum(s.duration for s in self.segs):.2f}초" if any(s.voice_duration for s in self.segs) else "최종 길이는 TTS 합성 후 확정"))
         self.table.setRowCount(len(self.segs))
         for r,s in enumerate(self.segs):
-            vals=[str(r+1),os.path.basename(s.path),f"{s.start:.1f}",f"{s.source_duration:.1f}s",f"{s.duration:.1f}s",f"{s.voice_duration:.1f}s" if s.voice_duration else "-",s.line]
+            vals=[str(r+1),os.path.basename(s.path),f"{s.start:.1f}",f"{s.source_duration:.1f}s",f"{s.duration:.1f}s",f"{s.voice_duration:.1f}s" if s.voice_duration else "-",s.visual_description,s.selection_reason,s.line]
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(v))
         self.table.resizeColumnsToContents(); self.table.horizontalHeader().setStretchLastSection(True)
+        for col in (6,7,8): self.table.setColumnWidth(col,220)
+        for row,s in enumerate(self.segs):
+            self.table.item(row,8).setToolTip('AI 대본 근거: '+s.visual_evidence)
 
     def do_script(self):
         if self.busy(): return
         if not self.segs: QMessageBox.warning(self,"확인","영상 분석부터 해야 합니다."); return
-        lines=make_script(self.desc.text(),self.segs,self.script_style.currentText())
-        for s,line in zip(self.segs,lines): s.line=line; s.play_duration=0; s.voice_duration=0
-        self.script.setPlainText("\n".join(lines)); self.refresh_table(); self.render.setEnabled(True); self.status.setText("장면별 대본 생성 완료. 한 줄이 해당 장면에 그대로 연결됩니다."); self.show_preview_segment(self.preview_slider.value())
+        key=self.get_ai_key()
+        if not key: return
+        self.set_edit_busy(True); self.status.setText('현재 컷의 실제 프레임을 AI가 다시 확인하는 중...')
+        self.script_worker=AIScriptWorker(self.segs,key,self.ai_model.text().strip(),self.desc.text(),self.script_style.currentText())
+        self.script_worker.done.connect(self.ai_script_finished); self.script_worker.failed.connect(self.fail); self.script_worker.start()
+
+    def ai_script_finished(self,segs):
+        self.segs=segs; self.script.setPlainText('\n'.join(s.line for s in segs)); self.set_edit_busy(False); self.refresh_table(); self.show_preview_segment(self.preview_slider.value())
+        self.status.setText('실제 컷 프레임을 근거로 AI 대본을 다시 작성했습니다.')
 
     def sync_script_from_box(self):
         lines=[x.strip() for x in self.script.toPlainText().splitlines()]
@@ -1024,6 +970,7 @@ class Main(QMainWindow):
         except Exception: pass
 
     def fail(self,msg):
+        self.set_edit_busy(False)
         self.script.setReadOnly(False)
         self.analyze.setEnabled(True); self.script_btn.setEnabled(bool(self.segs)); self.render.setEnabled(bool(self.segs and self.script.toPlainText().strip())); self.set_status(0,"오류 발생"); QMessageBox.critical(self,"오류",msg[-7000:])
 

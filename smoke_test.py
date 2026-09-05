@@ -11,7 +11,9 @@ def run_checks(app, report_path):
     import numpy as np
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QPixmap, QColor
+    import ai_editor
     qt = QApplication.instance() or QApplication([])
+    app.load_fonts()
     report = {"status": "failed"}
     try:
         with tempfile.TemporaryDirectory(prefix="threeguys_check_") as folder:
@@ -68,6 +70,7 @@ def run_checks(app, report_path):
                 secret=app.protect_secret("local-self-test")
                 assert secret and app.unprotect_secret(secret)=="local-self-test"
             report={"status":"passed","duration_seconds":expected,"resolution":"1080x1920",
+                    "ai_module_import":"passed","live_ai_api":"not tested: user API key required",
                     "checks":["selected source bounds","three TTS boundaries","short audio padding",
                               "burn-in render","logo geometry and overlay","bundled FFmpeg","DPAPI"]}
     except Exception as exc:
