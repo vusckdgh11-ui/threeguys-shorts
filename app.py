@@ -1,4 +1,4 @@
-import os, sys, re, math, wave, tempfile, subprocess, traceback, requests, hashlib, base64, shutil
+import os, sys, re, math, wave, tempfile, subprocess, traceback, requests, hashlib, base64, shutil, textwrap
 from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import List
@@ -305,7 +305,6 @@ def _synthesize_sapi(text, out_wav, voice_index=0, rate=0):
         voice.Speak(text, 16)  # Speak literal text, never interpret user text as XML.
     finally:
         stream.Close()
-        voice.AudioOutputStream = None
         stream = voices = voice = None
 
 
@@ -397,7 +396,8 @@ def build_ass(path, segs, total, banner=True, caption_style="쇼츠 굵은 흰�
     t = 0.0
     for s in segs:
         end = t + s.duration
-        txt = emphasize_ass(s.line, caption_style)
+        wrapped='\n'.join(textwrap.wrap(s.line, width=max(6,int(900 / max(1,cap_size))), break_long_words=True))
+        txt = emphasize_ass(wrapped, caption_style)
         events.append(f"Dialogue: 0,{ass_time(t)},{ass_time(end)},Caption,,0,0,0,,{{\\an5\\pos({int(cap_x)},{int(cap_y)})}}{txt}")
         t = end
     Path(path).write_text(header + "\n".join(events), encoding='utf-8-sig')
@@ -625,7 +625,7 @@ class CaptionItem(QGraphicsTextItem):
         super().__init__(); self.changed_cb = changed_cb
         self.setFlags(QGraphicsTextItem.ItemIsMovable | QGraphicsTextItem.ItemIsSelectable)
         self.setDefaultTextColor(QColor('white'))
-        self.setFont(QFont('Malgun Gothic', 74, QFont.Bold))
+        font=QFont('Malgun Gothic',weight=QFont.Bold); font.setPixelSize(74); self.setFont(font)
         self.setTextWidth(900)
         self.setHtml("<div align='center'>자막 미리보기</div>")
         self.setZValue(30)
@@ -687,18 +687,22 @@ class PreviewView(QGraphicsView):
 
     def emit_caption(self):
         p = self.caption.pos(); size = int(74 * self.caption.scale())
-        cx = int(p.x() + 450 * self.caption.scale())
-        cy = int(p.y() + 90 * self.caption.scale())
+        center=self.caption.boundingRect().center()
+        cx = int(p.x() + center.x() * self.caption.scale())
+        cy = int(p.y() + center.y() * self.caption.scale())
         self.caption_changed.emit(cx, cy, size)
 
     def set_caption(self, text):
+        center=self.caption.mapToScene(self.caption.boundingRect().center())
         safe = (text or "자막 미리보기").replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
         self.caption.setHtml(f"<div align='center'>{safe}</div>")
+        self.set_caption_geometry(center.x(),center.y(),74*self.caption.scale())
 
     def set_caption_geometry(self, cx, cy, size):
         scale = max(0.35, min(3.5, size / 74.0))
         self.caption.setScale(scale)
-        self.caption.setPos(cx - 450*scale, cy - 90*scale)
+        center=self.caption.boundingRect().center()
+        self.caption.setPos(cx - center.x()*scale, cy - center.y()*scale)
 
     def set_banner(self, on):
         self.banner1.setVisible(on); self.banner2.setVisible(on)
