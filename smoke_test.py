@@ -39,6 +39,7 @@ def run_checks(app, report_path):
                 with wave.open(str(path),'wb') as wav:
                     wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(48000); wav.writeframes(samples.tobytes())
             segs=[app.Segment(str(source),0,0.8,100,line) for line in durations]
+            segs[1].start,segs[1].end=1.05,1.85
             output=root / "output.mp4"
             with patch.object(app,"synthesize_line",fake_tts):
                 app.render_video(segs,str(output),"test",None,"",0,str(logo_path),120,50,200,True,True)
@@ -46,11 +47,18 @@ def run_checks(app, report_path):
             assert abs(app.get_video_duration(str(output))-expected)<0.04
             cap=app.cv2.VideoCapture(str(output))
             assert (int(cap.get(app.cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(app.cv2.CAP_PROP_FRAME_HEIGHT))) == (1080,1920)
-            # Long narration must never reveal the blue frames outside the chosen source interval.
+            # The middle cut must show its selected blue interval, not the uploaded file's beginning.
             cap.set(app.cv2.CAP_PROP_POS_MSEC,(segs[0].duration+1.7)*1000)
             ok,frame=cap.read(); cap.release(); assert ok
-            b,g,r=frame[1000,500]; assert r>180 and b<60,(int(b),int(g),int(r))
+            b,g,r=frame[1000,500]; assert b>180 and r<60,(int(b),int(g),int(r))
             b,g,r=frame[230,80]; assert g>180 and r<60,(int(b),int(g),int(r))
+            cap=app.cv2.VideoCapture(str(output)); cap.set(app.cv2.CAP_PROP_POS_MSEC,1200)
+            ok,first=cap.read(); cap.release(); assert ok
+            b,g,r=first[1000,500]; assert r>180 and b<60  # No leak outside the first selected cut.
+            ass=root/'verify.ass'; app.build_ass(ass,segs,expected)
+            subtitle_text=ass.read_text(encoding='utf-8-sig')
+            for s,(start,end) in zip(segs,app.timeline_ranges(segs)):
+                assert f'Dialogue: 0,{app.ass_time(start)},{app.ass_time(end)},Caption' in subtitle_text
             audio=root / "decoded.wav"
             app.run_ffmpeg([ff,"-y","-i",str(output),"-vn","-ar","48000","-ac","1","-c:a","pcm_s16le",str(audio)])
             with wave.open(str(audio),'rb') as wav:

@@ -12,11 +12,11 @@ from PySide6.QtWidgets import (
     QListWidget, QFileDialog, QLabel, QLineEdit, QComboBox, QSpinBox, QTextEdit,
     QTableWidget, QTableWidgetItem, QMessageBox, QProgressBar, QGroupBox,
     QFormLayout, QCheckBox, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsTextItem, QSlider, QSplitter, QScrollArea, QAbstractItemView
+    QGraphicsTextItem, QSlider, QSplitter, QScrollArea, QAbstractItemView, QGraphicsRectItem
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts V4 · AI 영상 편집"
+APP_NAME = "ThreeGuys Shorts V4.1 · 현장 이야기 AI 편집"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -214,6 +214,15 @@ def emphasize_ass(text, style):
     return re.sub(pattern, lambda m: "{\\c" + color + "}" + m.group(0) + "{\\c&H00FFFFFF&}", text)
 
 
+def timeline_ranges(segs):
+    """One ordered clock shared by the table and burned-in captions."""
+    ranges=[]; position=0.0
+    for s in segs:
+        end=position+s.duration
+        ranges.append((position,end)); position=end
+    return ranges
+
+
 def build_ass(path, segs, total, banner=True, caption_style="쇼츠 굵은 흰색+검정외곽선", cap_x=540, cap_y=1500, cap_size=74):
     if caption_style == "깔끔한 흰색":
         outline, back, border = 2, "&H30000000", 1
@@ -226,13 +235,10 @@ def build_ass(path, segs, total, banner=True, caption_style="쇼츠 굵은 흰�
     if banner:
         events.append(f"Dialogue: 0,{ass_time(0)},{ass_time(total)},Banner,,0,0,0,,고독사 | 혈흔 | 쓰레기집 | 특수청소 문의")
         events.append(f"Dialogue: 0,{ass_time(0)},{ass_time(total)},Brand,,0,0,0,,쓰리가이즈 특수청소  ·  24시간 상담  ·  서울·경기 수도권")
-    t = 0.0
-    for s in segs:
-        end = t + s.duration
+    for s,(t,end) in zip(segs,timeline_ranges(segs)):
         wrapped='\n'.join(textwrap.wrap(s.line, width=max(6,int(900 / max(1,cap_size))), break_long_words=True))
         txt = emphasize_ass(wrapped, caption_style)
         events.append(f"Dialogue: 0,{ass_time(t)},{ass_time(end)},Caption,,0,0,0,,{{\\an5\\pos({int(cap_x)},{int(cap_y)})}}{txt}")
-        t = end
     Path(path).write_text(header + "\n".join(events), encoding='utf-8-sig')
 
 
@@ -350,6 +356,7 @@ def ai_segments(paths, target, key, model, brief, style, step, progress):
     scenes=ai_editor.analyze_sources(paths,client,brief,step,progress)
     progress(75,'AI가 내용과 중복을 고려해 타임라인을 정리하는 중...')
     cuts=ai_editor.plan_timeline(scenes,target,client,brief)
+    cuts=ai_editor.refine_timeline(cuts,client,lambda n,total:progress(76+round(8*n/total),f'선택 컷 동작·시각 정밀 확인 {n}/{total}'))
     progress(85,'선택한 컷의 실제 프레임을 다시 보고 대본 작성 중...')
     lines=ai_editor.write_script(cuts,client,brief,style)
     return [Segment(c.path,c.start,c.end,c.confidence*100,line['text'],
@@ -415,79 +422,70 @@ class VoiceWorker(QThread):
         finally: self.task=None
 
 
-class ResizePixmapItem(QGraphicsPixmapItem):
-    HANDLE = 32
-    def __init__(self, pixmap, changed_cb=None):
-        super().__init__(pixmap)
-        self.changed_cb = changed_cb
-        self.resize_corner = None
-        self.old_scene_rect = None
-        self.orig_w = max(1, pixmap.width())
-        self.setFlags(QGraphicsPixmapItem.ItemIsMovable | QGraphicsPixmapItem.ItemIsSelectable)
-        self.setAcceptHoverEvents(True)
-        self.setZValue(20)
+class LogoResizeHandle(QGraphicsRectItem):
+    """A screen-sized hit target, including on transparent image corners."""
+    def __init__(self, owner, corner, pos):
+        super().__init__(-7,-7,14,14,owner)
+        self.owner,self.corner=owner,corner
+        self.old_rect=None
+        self.setPos(pos)
+        self.setFlag(QGraphicsRectItem.ItemIgnoresTransformations,True)
+        self.setBrush(QBrush(QColor('white')))
+        self.setPen(QPen(QColor('#008cff'),2))
+        self.setCursor(Qt.SizeFDiagCursor if corner in ('tl','br') else Qt.SizeBDiagCursor)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setZValue(100)
 
-    def _corner_at(self, p):
-        r = self.boundingRect(); h = self.HANDLE / max(0.02, self.scale())
-        tests = {
-            'tl': QPointF(r.left(), r.top()), 'tr': QPointF(r.right(), r.top()),
-            'bl': QPointF(r.left(), r.bottom()), 'br': QPointF(r.right(), r.bottom())
-        }
-        for name, pt in tests.items():
-            if abs(p.x()-pt.x()) <= h and abs(p.y()-pt.y()) <= h:
-                return name
-        return None
-
-    def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
-        if self.isSelected():
-            painter.setPen(QPen(QColor('#00aaff'), 5 / max(0.1, self.scale())))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(self.boundingRect())
-            painter.setBrush(QBrush(QColor('#ffffff')))
-            painter.setPen(QPen(QColor('#00aaff'), 3 / max(0.1, self.scale())))
-            r = self.boundingRect(); s = 24 / max(0.1, self.scale())
-            for x,y in [(r.left(),r.top()),(r.right(),r.top()),(r.left(),r.bottom()),(r.right(),r.bottom())]:
-                painter.drawRect(x-s/2,y-s/2,s,s)
-
-    def mousePressEvent(self, event):
-        c = self._corner_at(event.pos())
-        if c:
-            self.setSelected(True)
-            self.resize_corner = c
-            self.old_scene_rect = self.mapRectToScene(QRectF(self.pixmap().rect()))
-            event.accept(); return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if not self.resize_corner or self.old_scene_rect is None:
-            super().mouseMoveEvent(event); return
-        r = self.old_scene_rect; sp = event.scenePos()
-        if self.resize_corner in ('br','tr'):
-            new_w = max(30.0, sp.x() - r.left())
-            new_x = r.left()
-        else:
-            new_w = max(30.0, r.right() - sp.x())
-            new_x = r.right() - new_w
-        vertical = sp.y() - r.top() if self.resize_corner in ('br','bl') else r.bottom() - sp.y()
-        new_w = max(30.0, (new_w + max(1.0, vertical) * r.width() / r.height()) / 2)
-        new_scale = max(0.02, min(10000 / self.orig_w, new_w / self.orig_w))
-        new_w = self.orig_w * new_scale
-        new_x = r.left() if self.resize_corner in ('br','tr') else r.right() - new_w
-        self.setScale(new_scale)
-        new_h = self.pixmap().height() * new_scale
-        if self.resize_corner in ('tl','tr'):
-            new_y = r.bottom() - new_h
-        else:
-            new_y = r.top()
-        self.setPos(new_x, new_y)
-        if self.changed_cb: self.changed_cb()
+    def mousePressEvent(self,event):
+        self.owner.setSelected(True)
+        self.old_rect=self.owner.mapRectToScene(QRectF(self.owner.pixmap().rect()))
         event.accept()
 
-    def mouseReleaseEvent(self, event):
-        self.resize_corner = None; self.old_scene_rect = None
+    def mouseMoveEvent(self,event):
+        if self.old_rect is not None:
+            self.owner.resize_to(self.corner,self.old_rect,event.scenePos())
+        event.accept()
+
+    def mouseReleaseEvent(self,event):
+        if self.old_rect is not None:
+            self.owner.resize_to(self.corner,self.old_rect,event.scenePos())
+        self.old_rect=None
+        event.accept()
+
+
+class ResizePixmapItem(QGraphicsPixmapItem):
+    def __init__(self,pixmap,changed_cb=None):
+        super().__init__(pixmap)
+        self.changed_cb=changed_cb
+        self.orig_w=max(1,pixmap.width())
+        self.setShapeMode(QGraphicsPixmapItem.BoundingRectShape)
+        self.setFlags(QGraphicsPixmapItem.ItemIsMovable | QGraphicsPixmapItem.ItemIsSelectable)
+        self.setZValue(20)
+        r=QRectF(pixmap.rect())
+        self.handles={name:LogoResizeHandle(self,name,point) for name,point in
+                      [('tl',r.topLeft()),('tr',r.topRight()),('bl',r.bottomLeft()),('br',r.bottomRight())]}
+
+    def resize_to(self,corner,r,point):
+        anchor_x=r.right() if corner in ('tl','bl') else r.left()
+        anchor_y=r.bottom() if corner in ('tl','tr') else r.top()
+        sx=-1 if corner in ('tl','bl') else 1
+        sy=-1 if corner in ('tl','tr') else 1
+        dx,dy=point.x()-anchor_x,point.y()-anchor_y
+        factor=(dx*sx*r.width()+dy*sy*r.height())/(r.width()**2+r.height()**2)
+        width=max(30.0,min(10000.0,r.width()*factor))
+        self.setScale(width/self.orig_w)
+        height=self.pixmap().height()*self.scale()
+        self.setPos(anchor_x-width if sx<0 else anchor_x,anchor_y-height if sy<0 else anchor_y)
+        if self.changed_cb: self.changed_cb()
+
+    def mouseMoveEvent(self,event):
+        super().mouseMoveEvent(event)
+        if self.changed_cb: self.changed_cb()
+
+    def mouseReleaseEvent(self,event):
         super().mouseReleaseEvent(event)
         if self.changed_cb: self.changed_cb()
+
 
 
 class CaptionItem(QGraphicsTextItem):
@@ -610,7 +608,9 @@ class Main(QMainWindow):
         br=QHBoxLayout(); add=QPushButton("영상 여러 개 추가"); add.clicked.connect(self.add_videos); br.addWidget(add); rem=QPushButton("선택 삭제"); rem.clicked.connect(self.remove_video); br.addWidget(rem); gl.addLayout(br); left.addWidget(g1)
 
         g2=QGroupBox("2) 현장 설명 / 길이"); f=QFormLayout(g2)
-        self.desc=QLineEdit(); self.desc.setPlaceholderText("예: 모텔 혈흔 특수청소, 혈흔 제거 약품 사용"); f.addRow("현장 설명",self.desc)
+        self.desc=QTextEdit(); self.desc.setFixedHeight(100)
+        self.desc.setPlaceholderText("현장 배경, 확인된 사실, 결과, 원하는 이야기 분위기를 적어주세요.\n예: 자살시도 후 생존 확인. 남은 현장을 정리한 작업. 안도감 있는 이야기.")
+        f.addRow("현장 설명",self.desc)
         self.target=QComboBox(); self.target.addItems(["40","50","60"]); self.target.setCurrentText("50"); f.addRow("목표 길이",self.target)
         self.analyze=QPushButton("1. AI 영상 인식 + 컷·대본 만들기"); self.analyze.clicked.connect(self.do_analyze); f.addRow(self.analyze); left.addWidget(g2)
 
@@ -657,7 +657,7 @@ class Main(QMainWindow):
         right_scroll=QScrollArea(); right_scroll.setWidgetResizable(True); right_scroll.setWidget(right_wrap); right_scroll.setMinimumWidth(360); splitter.addWidget(right_scroll)
 
         g4=QGroupBox("선택된 타임라인 — 한 행 = 한 장면 = 한 대본 = 한 TTS"); gr=QVBoxLayout(g4)
-        self.table=QTableWidget(0,9); self.table.setHorizontalHeaderLabels(["#","파일","시작","원본컷","동기화컷","TTS","AI 인식 내용","선택 이유","대본"]); self.table.horizontalHeader().setStretchLastSection(True); self.table.setMinimumHeight(300); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); gr.addWidget(self.table); right.addWidget(g4)
+        self.table=QTableWidget(0,10); self.table.setHorizontalHeaderLabels(["#","파일","원본 시작","원본 끝","출력 시작","출력 끝","TTS","AI 인식 내용","선택 이유","대본"]); self.table.horizontalHeader().setStretchLastSection(True); self.table.setMinimumHeight(300); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); gr.addWidget(self.table); right.addWidget(g4)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         trim_row=QHBoxLayout()
         trim_btn=QPushButton("선택 컷 시작/끝 수정"); trim_btn.clicked.connect(self.trim_cut); trim_row.addWidget(trim_btn)
@@ -808,9 +808,9 @@ class Main(QMainWindow):
         if not ok: return
         try:
             start,end=map(float,value.split(','))
-            if not (0 <= start < end <= get_video_duration(s.path)): raise ValueError()
+            if not (0 <= start < end <= get_video_duration(s.path)) or end-start<1.2: raise ValueError()
         except ValueError:
-            QMessageBox.warning(self,"컷 범위","원본 안의 시작초, 끝초를 입력하세요."); return
+            QMessageBox.warning(self,"컷 범위","원본 안에서 1.2초 이상의 시작초, 끝초를 입력하세요."); return
         s.start,s.end=start,end; s.play_duration=0; s.voice_duration=0
         s.line=''; s.visual_evidence=''; self.script.setPlainText('\n'.join(s.line for s in self.segs)); self.render.setEnabled(False)
         self.status.setText('컷 범위가 바뀌었습니다. AI 대본을 다시 작성하세요.')
@@ -861,7 +861,7 @@ class Main(QMainWindow):
     def start_ai(self,key,render_options=None):
         self.invalidate_timeline(); self.set_edit_busy(True)
         self.auto_output=render_options['out_mp4'] if render_options else ''
-        options=(list(self.paths),int(self.target.currentText()),key,self.ai_model.text().strip(),self.desc.text(),self.script_style.currentText(),self.sample_step.currentData())
+        options=(list(self.paths),int(self.target.currentText()),key,self.ai_model.text().strip(),self.desc.toPlainText(),self.script_style.currentText(),self.sample_step.currentData())
         self.ai_worker=AIEditWorker(options,render_options)
         self.ai_worker.status.connect(self.set_status); self.ai_worker.done.connect(self.ai_finished); self.ai_worker.failed.connect(self.fail); self.ai_worker.start()
 
@@ -895,13 +895,13 @@ class Main(QMainWindow):
         self.length_info.setText(f"선택 {sum(s.source_duration for s in self.segs):.2f}초 / 목표 {self.target.currentText()}초 · "
                                  + (f"TTS 동기화 {sum(s.duration for s in self.segs):.2f}초" if any(s.voice_duration for s in self.segs) else "최종 길이는 TTS 합성 후 확정"))
         self.table.setRowCount(len(self.segs))
-        for r,s in enumerate(self.segs):
-            vals=[str(r+1),os.path.basename(s.path),f"{s.start:.1f}",f"{s.source_duration:.1f}s",f"{s.duration:.1f}s",f"{s.voice_duration:.1f}s" if s.voice_duration else "-",s.visual_description,s.selection_reason,s.line]
+        for r,(s,(start,end)) in enumerate(zip(self.segs,timeline_ranges(self.segs))):
+            vals=[str(r+1),os.path.basename(s.path),f"{s.start:.2f}",f"{s.end:.2f}",f"{start:.2f}",f"{end:.2f}",f"{s.voice_duration:.2f}s" if s.voice_duration else "-",s.visual_description,s.selection_reason,s.line]
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(v))
         self.table.resizeColumnsToContents(); self.table.horizontalHeader().setStretchLastSection(True)
-        for col in (6,7,8): self.table.setColumnWidth(col,220)
+        for col in (7,8,9): self.table.setColumnWidth(col,220)
         for row,s in enumerate(self.segs):
-            self.table.item(row,8).setToolTip('AI 대본 근거: '+s.visual_evidence)
+            self.table.item(row,9).setToolTip('대본 근거 (영상/현장 설명): '+s.visual_evidence)
 
     def do_script(self):
         if self.busy(): return
@@ -909,7 +909,7 @@ class Main(QMainWindow):
         key=self.get_ai_key()
         if not key: return
         self.set_edit_busy(True); self.status.setText('현재 컷의 실제 프레임을 AI가 다시 확인하는 중...')
-        self.script_worker=AIScriptWorker(self.segs,key,self.ai_model.text().strip(),self.desc.text(),self.script_style.currentText())
+        self.script_worker=AIScriptWorker(self.segs,key,self.ai_model.text().strip(),self.desc.toPlainText(),self.script_style.currentText())
         self.script_worker.done.connect(self.ai_script_finished); self.script_worker.failed.connect(self.fail); self.script_worker.start()
 
     def ai_script_finished(self,segs):
