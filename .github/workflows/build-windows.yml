@@ -5,10 +5,15 @@ on:
   push:
     branches:
       - main
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -25,12 +30,46 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Test timeline and Windows voice
+        run: python -m unittest -v test_sync
+
+      - name: Test actual MP4 render
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python smoke_test.py smoke-source.json
+
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --clean --windowed --onefile --name ThreeGuysShorts app.py
+          pyinstaller --noconfirm --clean --windowed --onefile --name ThreeGuysShorts --collect-all imageio_ffmpeg --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32crypt app.py
+
+      - name: Test packaged EXE
+        env:
+          QT_QPA_PLATFORM: offscreen
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'smoke-exe.json'
+          $process = Start-Process -FilePath 'dist/ThreeGuysShorts.exe' -ArgumentList @('--self-test', $report) -WindowStyle Hidden -PassThru
+          if (-not $process.WaitForExit(180000)) { $process.Kill(); throw 'EXE self-test timed out' }
+          if ($process.ExitCode -ne 0) { throw "EXE failed: $($process.ExitCode)" }
+          if ((Get-Content -Raw $report | ConvertFrom-Json).status -ne 'passed') { throw 'EXE self-test failed' }
+          Get-FileHash dist/ThreeGuysShorts.exe -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
 
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
         with:
           name: ThreeGuysShorts-Windows
-          path: dist/ThreeGuysShorts.exe
+          if-no-files-found: error
+          path: |
+            dist/ThreeGuysShorts.exe
+            dist/SHA256.txt
+            smoke-source.json
+            smoke-exe.json
+
+      - name: Upload diagnostic reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            smoke-*.json
+            build/ThreeGuysShorts/warn-ThreeGuysShorts.txt
