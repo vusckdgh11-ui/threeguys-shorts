@@ -13,11 +13,12 @@ from PySide6.QtWidgets import (
     QListWidget, QFileDialog, QLabel, QLineEdit, QComboBox, QSpinBox, QTextEdit,
     QTableWidget, QTableWidgetItem, QMessageBox, QProgressBar, QGroupBox,
     QFormLayout, QCheckBox, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsTextItem, QSlider, QSplitter, QScrollArea, QAbstractItemView, QGraphicsRectItem
+    QGraphicsTextItem, QSlider, QSplitter, QScrollArea, QAbstractItemView, QGraphicsRectItem,
+    QDialog, QDialogButtonBox, QFontComboBox, QColorDialog, QHeaderView
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts V4.3.1 · 무료 Codex 분석"
+APP_NAME = "ThreeGuys Shorts V4.4 · 대본·자막 검토"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -205,14 +206,43 @@ def ass_time(sec):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def emphasize_ass(text, style):
+def ass_color(value):
+    if not isinstance(value,str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}',value):
+        raise ValueError('자막 색상 형식이 올바르지 않습니다.')
+    red,green,blue=value[1:3],value[3:5],value[5:7]
+    return f'&H00{blue}{green}{red}&'.upper()
+
+
+def safe_font_name(value):
+    value=re.sub(r'[,\r\n]', '', value or '').strip()
+    return value or 'Malgun Gothic'
+
+
+def copy_windows_font(family,destination):
+    if os.name!='nt': return
+    try:
+        import winreg
+        Path(destination).mkdir(parents=True,exist_ok=True)
+        key=winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts')
+        index=0
+        while True:
+            try: name,value,_=winreg.EnumValue(key,index); index+=1
+            except OSError: break
+            if safe_font_name(family).lower() not in name.lower() or not isinstance(value,str): continue
+            source=Path(value)
+            if not source.is_absolute(): source=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'/source
+            if source.is_file(): shutil.copyfile(source,Path(destination)/source.name); return
+    except OSError: return
+
+
+def emphasize_ass(text, style, base_color="&H00FFFFFF&"):
     text = esc_ass(text)
     if style not in ("핵심어 노랑 강조", "핵심어 빨강 강조"):
         return text
     color = "&H0000FFFF&" if style == "핵심어 노랑 강조" else "&H000000FF&"
     keywords = ["혈흔", "오염", "약품", "냄새", "반응", "24시간", "자살", "생존", "특수청소"]
     pattern = r"(\d+[가-힣A-Za-z%]*|" + "|".join(map(re.escape, keywords)) + r")"
-    return re.sub(pattern, lambda m: "{\\c" + color + "}" + m.group(0) + "{\\c&H00FFFFFF&}", text)
+    return re.sub(pattern, lambda m: "{\\c" + color + "}" + m.group(0) + "{\\c" + base_color + "}", text)
 
 
 def timeline_ranges(segs):
@@ -224,21 +254,25 @@ def timeline_ranges(segs):
     return ranges
 
 
-def build_ass(path, segs, total, banner=True, caption_style="쇼츠 굵은 흰색+검정외곽선", cap_x=540, cap_y=1500, cap_size=74):
+def build_ass(path, segs, total, banner=True, caption_style="쇼츠 굵은 흰색+검정외곽선", cap_x=540, cap_y=1500, cap_size=74,
+              font_name="Malgun Gothic", text_color="#FFFFFF", outline_color="#101010", outline_width=5, bold=True):
     if caption_style == "깔끔한 흰색":
-        outline, back, border = 2, "&H30000000", 1
+        default_outline, back, border = 2, "&H30000000", 1
     elif caption_style == "검정 박스형":
-        outline, back, border = 1, "&HC8000000", 3
+        default_outline, back, border = 1, "&HC8000000", 3
     else:
-        outline, back, border = 5, "&H60000000", 1
-    header = f"""[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Caption,Malgun Gothic,{int(cap_size)},&H00FFFFFF,&H000000FF,&H00101010,{back},-1,0,0,0,100,100,0,0,{border},{outline},1,5,70,70,0,1\nStyle: Banner,Malgun Gothic,44,&H00FFFFFF,&H000000FF,&H00000000,&HA8000000,-1,0,0,0,100,100,0,0,3,2,0,8,40,40,55,1\nStyle: Brand,Malgun Gothic,36,&H00FFFFFF,&H000000FF,&H00000000,&H7F000000,-1,0,0,0,100,100,0,0,3,1,0,8,40,40,126,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"""
+        default_outline, back, border = 5, "&H60000000", 1
+    font_name=safe_font_name(font_name); primary=ass_color(text_color); outline_colour=ass_color(outline_color)
+    outline=max(0,min(12,int(outline_width if outline_width is not None else default_outline)))
+    bold_value=-1 if bold else 0
+    header = f"""[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Caption,{font_name},{int(cap_size)},{primary},&H000000FF,{outline_colour},{back},{bold_value},0,0,0,100,100,0,0,{border},{outline},1,5,70,70,0,1\nStyle: Banner,Malgun Gothic,44,&H00FFFFFF,&H000000FF,&H00000000,&HA8000000,-1,0,0,0,100,100,0,0,3,2,0,8,40,40,55,1\nStyle: Brand,Malgun Gothic,36,&H00FFFFFF,&H000000FF,&H00000000,&H7F000000,-1,0,0,0,100,100,0,0,3,1,0,8,40,40,126,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"""
     events = []
     if banner:
         events.append(f"Dialogue: 0,{ass_time(0)},{ass_time(total)},Banner,,0,0,0,,고독사 | 혈흔 | 쓰레기집 | 특수청소 문의")
         events.append(f"Dialogue: 0,{ass_time(0)},{ass_time(total)},Brand,,0,0,0,,쓰리가이즈 특수청소  ·  24시간 상담  ·  서울·경기 수도권")
     for s,(t,end) in zip(segs,timeline_ranges(segs)):
         wrapped='\n'.join(textwrap.wrap(s.line, width=max(6,int(900 / max(1,cap_size))), break_long_words=True))
-        txt = emphasize_ass(wrapped, caption_style)
+        txt = emphasize_ass(wrapped, caption_style, primary)
         events.append(f"Dialogue: 0,{ass_time(t)},{ass_time(end)},Caption,,0,0,0,,{{\\an5\\pos({int(cap_x)},{int(cap_y)})}}{txt}")
     Path(path).write_text(header + "\n".join(events), encoding='utf-8-sig')
 
@@ -255,7 +289,9 @@ def run_ffmpeg(cmd, cwd=None):
 
 def render_video(segs: List[Segment], out_mp4, provider, voice_data, api_key, voice_rate,
                  logo_path="", logo_w=300, logo_x=740, logo_y=220, effects=True, banner=True,
-                 caption_style="쇼츠 굵은 흰색+검정외곽선", cap_x=540, cap_y=1500, cap_size=74, progress=None):
+                 caption_style="쇼츠 굵은 흰색+검정외곽선", cap_x=540, cap_y=1500, cap_size=74,
+                 font_name="Malgun Gothic", text_color="#FFFFFF", outline_color="#101010",
+                 outline_width=5, bold=True, progress=None):
     if not segs or any(not s.line.strip() for s in segs):
         raise ValueError("각 컷에 대본 한 줄을 입력하세요.")
     destination = Path(out_mp4).resolve()
@@ -275,6 +311,7 @@ def render_video(segs: List[Segment], out_mp4, provider, voice_data, api_key, vo
         if font.is_file():
             (tmp / 'fonts').mkdir()
             shutil.copyfile(font,tmp / 'fonts' / 'malgun.ttf')
+        copy_windows_font(font_name,tmp/'fonts')
         audio_files = []
         for i, s in enumerate(segs):
             wav = tmp / f"voice_{i:03d}.wav"
@@ -289,7 +326,8 @@ def render_video(segs: List[Segment], out_mp4, provider, voice_data, api_key, vo
             if progress: progress(5 + int(25 * (i + 1) / len(segs)), f"TTS {i+1}/{len(segs)}")
 
         total = sum(s.duration for s in segs)
-        build_ass(tmp / "captions.ass", segs, total, banner, caption_style, cap_x, cap_y, cap_size)
+        build_ass(tmp / "captions.ass", segs, total, banner, caption_style, cap_x, cap_y, cap_size,
+                  font_name,text_color,outline_color,outline_width,bold)
         # Process one source at a time to bound decoder memory and Windows command length.
         parts = []
         for i, s in enumerate(segs):
@@ -586,8 +624,74 @@ class PreviewView(QGraphicsView):
         center=self.caption.boundingRect().center()
         self.caption.setPos(cx - center.x()*scale, cy - center.y()*scale)
 
+    def set_caption_appearance(self,family,color,bold):
+        center=self.caption.mapToScene(self.caption.boundingRect().center())
+        font=QFont(safe_font_name(family)); font.setPixelSize(74); font.setBold(bool(bold))
+        self.caption.setFont(font); self.caption.setDefaultTextColor(QColor(color))
+        self.set_caption_geometry(center.x(),center.y(),74*self.caption.scale())
+
     def set_banner(self, on):
         self.banner1.setVisible(on); self.banner2.setVisible(on)
+
+
+class CaptionReviewDialog(QDialog):
+    def __init__(self,segs,font_name,font_size,text_color,outline_color,outline_width,bold,parent=None):
+        super().__init__(parent); self.setWindowTitle('대본·자막 검토 및 수정'); self.resize(1050,720)
+        self.text_color=text_color; self.outline_color=outline_color
+        layout=QVBoxLayout(self)
+        notice=QLabel('아래 내용은 AI가 만든 초안입니다. 각 행의 대본 칸을 클릭해 직접 고친 뒤 “수정 내용 적용”을 누르세요.')
+        notice.setWordWrap(True); notice.setStyleSheet('font-size:15px;font-weight:700;color:#b02020'); layout.addWidget(notice)
+        self.table=QTableWidget(len(segs),4); self.table.setHorizontalHeaderLabels(['컷','영상 구간','장면 내용','대본·자막 — 직접 수정'])
+        self.table.setWordWrap(True); self.table.verticalHeader().setDefaultSectionSize(86)
+        self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3,QHeaderView.Stretch)
+        for row,seg in enumerate(segs):
+            values=[str(row+1),f'{Path(seg.path).name}  {seg.start:.2f}~{seg.end:.2f}초',seg.visual_description,seg.line]
+            for column,value in enumerate(values):
+                item=QTableWidgetItem(value)
+                if column!=3: item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row,column,item)
+        layout.addWidget(self.table,1)
+
+        controls=QHBoxLayout(); controls.addWidget(QLabel('글꼴'))
+        self.font_box=QFontComboBox(); self.font_box.setCurrentFont(QFont(font_name)); controls.addWidget(self.font_box,1)
+        controls.addWidget(QLabel('크기'))
+        self.size_box=QSpinBox(); self.size_box.setRange(30,140); self.size_box.setValue(font_size); controls.addWidget(self.size_box)
+        self.bold_box=QCheckBox('굵게'); self.bold_box.setChecked(bold); controls.addWidget(self.bold_box)
+        controls.addWidget(QLabel('외곽선'))
+        self.outline_box=QSpinBox(); self.outline_box.setRange(0,12); self.outline_box.setValue(outline_width); controls.addWidget(self.outline_box)
+        self.text_color_button=QPushButton('글자색'); self.text_color_button.clicked.connect(lambda:self.choose_color('text')); controls.addWidget(self.text_color_button)
+        self.outline_color_button=QPushButton('외곽선색'); self.outline_color_button.clicked.connect(lambda:self.choose_color('outline')); controls.addWidget(self.outline_color_button)
+        layout.addLayout(controls)
+        self.sample=QLabel('자막 모양 미리보기'); self.sample.setAlignment(Qt.AlignCenter); self.sample.setMinimumHeight(70); layout.addWidget(self.sample)
+        self.font_box.currentFontChanged.connect(self.update_sample); self.size_box.valueChanged.connect(self.update_sample); self.bold_box.toggled.connect(self.update_sample)
+        self.update_sample()
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText('수정 내용 적용'); buttons.button(QDialogButtonBox.Cancel).setText('나중에 검토')
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+
+    def choose_color(self,kind):
+        current=self.text_color if kind=='text' else self.outline_color
+        color=QColorDialog.getColor(QColor(current),self,'색상 선택')
+        if not color.isValid(): return
+        if kind=='text': self.text_color=color.name().upper()
+        else: self.outline_color=color.name().upper()
+        self.update_sample()
+
+    def update_sample(self,*_):
+        font=self.font_box.currentFont(); font.setPointSize(max(10,self.size_box.value()//2)); font.setBold(self.bold_box.isChecked())
+        self.sample.setFont(font); self.sample.setStyleSheet(f'color:{self.text_color};background:#222;padding:8px;border:3px solid {self.outline_color}')
+
+    def edited_lines(self):
+        return [self.table.item(row,3).text().strip() for row in range(self.table.rowCount())]
+
+    def accept(self):
+        lines=self.edited_lines()
+        if not all(lines) or any('\n' in line or '\r' in line or len(line)>120 for line in lines):
+            QMessageBox.warning(self,'대본 확인','각 컷의 대본을 한 줄로 입력하고 120자 이내로 맞춰주세요.'); return
+        super().accept()
 
 
 class Main(QMainWindow):
@@ -602,6 +706,12 @@ class Main(QMainWindow):
         self.settings.remove("typecast_api_key")  # Remove plaintext left by pre-V3 versions.
         self.preview_timer=QTimer(self); self.preview_timer.timeout.connect(self.preview_next)
         self.cap_x, self.cap_y, self.cap_size = 540, 1500, 74
+        self.cap_font=str(self.settings.value('caption_font','Malgun Gothic'))
+        self.cap_text_color=str(self.settings.value('caption_text_color','#FFFFFF'))
+        self.cap_outline_color=str(self.settings.value('caption_outline_color','#101010'))
+        self.cap_outline_width=int(self.settings.value('caption_outline_width',5))
+        self.cap_bold=str(self.settings.value('caption_bold','true')).lower()=='true'
+        self.captions_approved=False
 
         root=QWidget(); self.setCentralWidget(root); outer=QVBoxLayout(root)
         title=QLabel("쓰리가이즈 쇼츠 자동제작"); title.setStyleSheet("font-size:24px;font-weight:700"); outer.addWidget(title)
@@ -659,6 +769,7 @@ class Main(QMainWindow):
         info.setWordWrap(True); info.setStyleSheet("color:#666"); gpl.addWidget(info)
         self.preview=PreviewView(); self.preview.logo_changed.connect(self.logo_changed); self.preview.caption_changed.connect(self.caption_changed); gpl.addWidget(self.preview,1)
         self.preview.set_caption_geometry(self.cap_x,self.cap_y,self.cap_size)
+        self.preview.set_caption_appearance(self.cap_font,self.cap_text_color,self.cap_bold)
         pr=QHBoxLayout(); self.play_btn=QPushButton("▶ 장면 넘겨보기"); self.play_btn.clicked.connect(self.toggle_preview); pr.addWidget(self.play_btn); self.preview_slider=QSlider(Qt.Horizontal); self.preview_slider.setRange(0,0); self.preview_slider.valueChanged.connect(self.preview_seek); pr.addWidget(self.preview_slider,1); gpl.addLayout(pr); cl.addWidget(gp); cl.addStretch(1); splitter.addWidget(center)
 
         # RIGHT content in scroll area
@@ -677,7 +788,9 @@ class Main(QMainWindow):
         g5=QGroupBox("타임라인 기반 대본 / 자막"); gs=QVBoxLayout(g5)
         sr=QHBoxLayout(); sr.addWidget(QLabel("대본 스타일")); self.script_style=QComboBox(); self.script_style.addItems(["강한 자극형","자극적","스토리형","정보형","차분한 전문형"]); self.script_style.setCurrentText("자극적"); sr.addWidget(self.script_style,1); gs.addLayout(sr)
         cr=QHBoxLayout(); cr.addWidget(QLabel("자막 스타일")); self.caption_style=QComboBox(); self.caption_style.addItems(["쇼츠 굵은 흰색+검정외곽선","핵심어 노랑 강조","핵심어 빨강 강조","깔끔한 흰색","검정 박스형"]); cr.addWidget(self.caption_style,1); gs.addLayout(cr)
-        self.script=QTextEdit(); self.script.setMinimumHeight(220); self.script.setPlaceholderText("영상 분석 후 대본 만들기를 누르세요. 한 줄이 한 장면입니다."); gs.addWidget(self.script)
+        self.review_btn=QPushButton("대본·자막 전체 보기 / 직접 수정 / 글꼴 설정"); self.review_btn.setEnabled(False); self.review_btn.clicked.connect(self.review_captions); self.review_btn.setMinimumHeight(44); self.review_btn.setStyleSheet('font-size:15px;font-weight:700'); gs.addWidget(self.review_btn)
+        self.font_info=QLabel(); self.font_info.setWordWrap(True); gs.addWidget(self.font_info); self.update_font_info()
+        self.script=QTextEdit(); self.script.setMinimumHeight(220); self.script.setPlaceholderText("분석 결과를 불러오면 대본이 여기에 표시됩니다. 한 줄이 한 장면이며 직접 수정할 수 있습니다."); gs.addWidget(self.script)
         self.script_btn=QPushButton("현재 컷을 AI가 다시 보고 대본 작성"); self.script_btn.setEnabled(False); self.script_btn.clicked.connect(self.do_script); self.script_btn.setVisible(False); gs.addWidget(self.script_btn)
         right.addWidget(g5)
 
@@ -805,6 +918,7 @@ class Main(QMainWindow):
         self.preview_timer.stop(); self.play_btn.setText("▶ 장면 넘겨보기")
         self.segs=[]; self.script.clear(); self.refresh_table()
         self.script_btn.setEnabled(False); self.render.setEnabled(False)
+        self.review_btn.setEnabled(False); self.captions_approved=False
         self.preview_slider.setRange(0,0)
 
     def trim_cut(self):
@@ -822,6 +936,7 @@ class Main(QMainWindow):
             QMessageBox.warning(self,"컷 범위","원본 안에서 1.2초 이상의 시작초, 끝초를 입력하세요."); return
         s.start,s.end=start,end; s.play_duration=0; s.voice_duration=0
         s.line=''; s.visual_evidence=''; self.script.setPlainText('\n'.join(s.line for s in self.segs)); self.render.setEnabled(False)
+        self.captions_approved=False; self.review_btn.setEnabled(True)
         self.status.setText('컷 범위가 바뀌었습니다. AI 대본을 다시 작성하세요.')
         self.refresh_table(); self.show_preview_segment(row)
 
@@ -832,10 +947,38 @@ class Main(QMainWindow):
         self.script.setPlainText("\n".join(s.line for s in self.segs)); self.refresh_table()
         self.preview_slider.setRange(0,max(0,len(self.segs)-1))
         self.script_btn.setEnabled(bool(self.segs)); self.render.setEnabled(bool(self.segs and all(s.line for s in self.segs)))
+        self.review_btn.setEnabled(bool(self.segs)); self.captions_approved=False
         self.show_preview_segment(self.preview_slider.value())
 
     def caption_changed(self,x,y,size):
         self.cap_x,self.cap_y,self.cap_size=x,y,size
+
+    def update_font_info(self):
+        weight='굵게' if self.cap_bold else '보통'
+        self.font_info.setText(f'현재 자막: {self.cap_font} · {self.cap_size}px · {weight} · 글자 {self.cap_text_color} · 외곽선 {self.cap_outline_color}/{self.cap_outline_width}')
+
+    def review_captions(self):
+        if not self.segs: return False
+        dialog=CaptionReviewDialog(self.segs,self.cap_font,self.cap_size,self.cap_text_color,
+                                   self.cap_outline_color,self.cap_outline_width,self.cap_bold,self)
+        if dialog.exec()!=QDialog.Accepted:
+            self.captions_approved=False; self.render.setEnabled(False)
+            self.status.setText('대본·자막 검토가 남아 있습니다. 검토 버튼을 다시 눌러주세요.')
+            return False
+        for seg,line in zip(self.segs,dialog.edited_lines()):
+            seg.line=line; seg.voice_duration=seg.play_duration=0
+        self.cap_font=dialog.font_box.currentFont().family(); self.cap_size=dialog.size_box.value()
+        self.cap_text_color=dialog.text_color; self.cap_outline_color=dialog.outline_color
+        self.cap_outline_width=dialog.outline_box.value(); self.cap_bold=dialog.bold_box.isChecked()
+        self.settings.setValue('caption_font',self.cap_font); self.settings.setValue('caption_text_color',self.cap_text_color)
+        self.settings.setValue('caption_outline_color',self.cap_outline_color); self.settings.setValue('caption_outline_width',self.cap_outline_width)
+        self.settings.setValue('caption_bold',self.cap_bold); self.settings.sync()
+        self.script.setPlainText('\n'.join(s.line for s in self.segs)); self.refresh_table()
+        self.preview.set_caption_appearance(self.cap_font,self.cap_text_color,self.cap_bold)
+        self.preview.set_caption_geometry(self.cap_x,self.cap_y,self.cap_size); self.show_preview_segment(self.preview_slider.value())
+        self.update_font_info(); self.captions_approved=True; self.render.setEnabled(True)
+        self.status.setText('대본·자막 수정과 글꼴 설정을 적용했습니다. 이제 MP4를 만들 수 있습니다.')
+        return True
 
     def set_status(self,p,s): self.prog.setValue(p); self.status.setText(s)
 
@@ -886,8 +1029,10 @@ class Main(QMainWindow):
         self.script.setPlainText('\n'.join(s.line for s in self.segs))
         self.refresh_table(); self.preview_slider.setRange(0,max(0,len(self.segs)-1))
         self.preview_slider.setValue(0); self.show_preview_segment(0)
-        self.render.setEnabled(True); self.script_btn.setEnabled(False)
-        self.set_status(100,f'Codex 분석 결과 적용 완료 — {len(self.segs)}개 컷')
+        self.render.setEnabled(False); self.script_btn.setEnabled(False); self.review_btn.setEnabled(True)
+        self.captions_approved=False
+        self.set_status(100,f'Codex 분석 결과 적용 완료 — {len(self.segs)}개 컷 · 대본을 확인하세요')
+        QTimer.singleShot(0,self.review_captions)
 
     def do_analyze(self):
         if self.busy(): return
@@ -916,6 +1061,7 @@ class Main(QMainWindow):
 
     def set_edit_busy(self,on):
         self.analyze.setEnabled(not on); self.import_analysis.setEnabled(not on); self.auto_btn.setEnabled(not on)
+        self.review_btn.setEnabled(not on and bool(self.segs))
         self.script_btn.setEnabled(not on and bool(self.segs)); self.render.setEnabled(not on and bool(self.segs) and all(s.line for s in self.segs))
         self.script.setReadOnly(on)
 
@@ -1004,6 +1150,7 @@ class Main(QMainWindow):
     def do_render(self):
         if self.busy(): return
         if not self.segs: return
+        if not self.captions_approved and not self.review_captions(): return
         if not self.sync_script_from_box():
             QMessageBox.warning(self,"대본 줄 수","대본은 선택된 장면 수와 같은 줄 수여야 합니다. 한 장면당 한 줄로 맞춰주세요."); return
         if self.voice.count()==0:
@@ -1020,7 +1167,7 @@ class Main(QMainWindow):
         self.render.setEnabled(False); self.analyze.setEnabled(False); self.script_btn.setEnabled(False)
         self.render_segs=[replace(s) for s in self.segs]
         self.script.setReadOnly(True)
-        args=(self.render_segs,out,provider,data,key,self.rate.value(),self.logo,self.lw.value(),self.lx.value(),self.ly.value(),self.effects.isChecked(),self.banner.isChecked(),self.caption_style.currentText(),self.cap_x,self.cap_y,self.cap_size)
+        args=(self.render_segs,out,provider,data,key,self.rate.value(),self.logo,self.lw.value(),self.lx.value(),self.ly.value(),self.effects.isChecked(),self.banner.isChecked(),self.caption_style.currentText(),self.cap_x,self.cap_y,self.cap_size,self.cap_font,self.cap_text_color,self.cap_outline_color,self.cap_outline_width,self.cap_bold)
         self.rworker=RenderWorker(args); self.rworker.status.connect(self.set_status); self.rworker.done.connect(self.render_done); self.rworker.failed.connect(self.fail); self.rworker.start()
 
     def render_done(self,out):
