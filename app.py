@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts V4.3 · 무료 Codex 분석"
+APP_NAME = "ThreeGuys Shorts V4.3.1 · 무료 Codex 분석"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -859,16 +859,21 @@ class Main(QMainWindow):
         self.set_status(100,'Codex 분석자료 완료 — 요청 문장을 클립보드에 복사했습니다.')
         try: os.startfile(job)
         except Exception: pass
-        QMessageBox.information(self,'Codex 분석자료 완료',
-            f'폴더를 열고 Codex에 복사된 요청 문장을 붙여넣으세요.\n\n{job}\n\n'
-            'Codex가 analysis-result.json을 만들면 프로그램의 2번 버튼을 누르세요.')
+        QMessageBox.information(self,'1단계 완료',
+            '오류가 아닙니다. 분석할 장면 준비가 끝났습니다.\n\n'
+            '1. 이 창에서 확인을 누르세요.\n'
+            '2. Codex 대화창을 클릭하고 Ctrl+V로 요청을 붙여넣으세요.\n'
+            '3. Codex가 분석을 마치면 프로그램의 2번 버튼을 누르세요.\n\n'
+            f'분석자료 폴더: {job}')
 
     def import_codex_result(self):
         if self.busy(): return
         last=self.settings.value('last_codex_job','E:/Codex/AnalysisJobs')
         default=str(Path(last)/'analysis-result.json') if Path(last).is_dir() else str(last)
-        result_path,_=QFileDialog.getOpenFileName(self,'Codex 분석 결과 선택',default,'Codex result (analysis-result.json)')
-        if not result_path: return
+        if Path(default).is_file(): result_path=default
+        else:
+            result_path,_=QFileDialog.getOpenFileName(self,'Codex 분석 결과 선택',default,'Codex result (analysis-result.json)')
+            if not result_path: return
         try:
             request,cuts=codex_exchange.import_result(result_path)
         except Exception as exc:
