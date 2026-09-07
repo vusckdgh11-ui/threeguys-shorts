@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts V4.1 · 현장 이야기 AI 편집"
+APP_NAME = "ThreeGuys Shorts V4.2 · 무료 PC AI 편집"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -352,7 +352,7 @@ def render_video(segs: List[Segment], out_mp4, provider, voice_data, api_key, vo
 
 
 def ai_segments(paths, target, key, model, brief, style, step, progress):
-    client=ai_editor.VisionClient(key,model)
+    client=ai_editor.create_client(key,model)
     scenes=ai_editor.analyze_sources(paths,client,brief,step,progress)
     progress(75,'AI가 내용과 중복을 고려해 타임라인을 정리하는 중...')
     cuts=ai_editor.plan_timeline(scenes,target,client,brief)
@@ -391,7 +391,7 @@ class AIScriptWorker(QThread):
     def run(self):
         try:
             cuts=[ai_editor.Scene(s.scene_id,s.path,s.start,s.end,s.visual_description,'','',s.selection_reason,s.score/100) for s in self.segs]
-            lines=ai_editor.write_script(cuts,ai_editor.VisionClient(self.key,self.model),self.brief,self.style)
+            lines=ai_editor.write_script(cuts,ai_editor.create_client(self.key,self.model),self.brief,self.style)
             for s,line in zip(self.segs,lines):
                 s.line=line['text']; s.visual_evidence=line['visual_evidence']; s.voice_duration=s.play_duration=0
             self.done.emit(self.segs)
@@ -616,13 +616,13 @@ class Main(QMainWindow):
 
         ga=QGroupBox("영상 인식 AI 연결"); fa=QFormLayout(ga)
         self.ai_key=QLineEdit(); self.ai_key.setEchoMode(QLineEdit.Password)
-        self.ai_key.setPlaceholderText("OpenAI API 키 (Typecast 키와 별개)")
+        self.ai_key.setPlaceholderText("로컬 AI는 비워두세요 (유료 OpenAI 선택 시에만 필요)")
         self.ai_key.setText(unprotect_secret(self.settings.value('vision_key_dpapi','')))
         fa.addRow("AI API 키",self.ai_key)
-        self.ai_model=QLineEdit(self.settings.value('vision_model',ai_editor.DEFAULT_MODEL)); fa.addRow("AI 모델",self.ai_model)
+        self.ai_model=QLineEdit(ai_editor.LOCAL_MODEL); fa.addRow("AI 모델",self.ai_model)
         self.sample_step=QComboBox(); self.sample_step.addItem('정밀 · 0.5초마다',0.5); self.sample_step.addItem('기본 · 1초마다',1.0); self.sample_step.addItem('절약 · 2초마다',2.0); self.sample_step.setCurrentIndex(1)
         fa.addRow("분석 간격",self.sample_step)
-        ai_note=QLabel("분석 버튼을 누르면 영상 프레임과 설명이 OpenAI API로 전송되며 API 사용료가 발생합니다. 원본 음성은 분석하지 않습니다. 짧은 동작은 놓칠 수 있습니다.")
+        ai_note=QLabel("기본은 무료 PC AI입니다. ollama: 모델은 영상 프레임과 설명을 이 PC에서 처리합니다. CPU에서는 오래 걸릴 수 있습니다. 원본 음성은 분석하지 않으며 짧은 동작은 놓칠 수 있습니다. OpenAI 모델로 직접 변경할 때만 별도 API 키와 요금이 필요합니다.")
         ai_note.setWordWrap(True); fa.addRow(ai_note)
         self.ai_key_status=QLabel('키는 Windows 암호화 저장만 사용합니다.'); self.ai_key_status.setWordWrap(True); fa.addRow(self.ai_key_status)
         forget=QPushButton('AI 키 저장 삭제'); forget.clicked.connect(self.forget_ai_key); fa.addRow(forget); left.addWidget(ga)
@@ -839,6 +839,8 @@ class Main(QMainWindow):
         self.start_ai(key)
 
     def get_ai_key(self):
+        if self.ai_model.text().strip().startswith('ollama:'):
+            return 'local-no-key'
         key=self.ai_key.text().strip()
         if not key:
             QMessageBox.warning(self,'영상 인식 AI','OpenAI API 키가 필요합니다. 채팅이 아닌 이 프로그램의 AI API 키 칸에 입력하세요.'); return ''
@@ -880,7 +882,7 @@ class Main(QMainWindow):
         if not self.voice.count(): QMessageBox.warning(self,'TTS','TTS 음성을 먼저 선택하세요.'); return
         if self.provider.currentText()=='Typecast' and not self.api_key.text().strip():
             QMessageBox.warning(self,'TTS','Typecast API 키를 입력하세요.'); return
-        out,_=QFileDialog.getSaveFileName(self,'AI 완성 MP4 저장','ThreeGuys_AI_Shorts.mp4','MP4 (*.mp4)')
+        out,_=QFileDialog.getSaveFileName(self,'AI 완성 MP4 저장',str(Path(os.environ.get('THREEGUYS_OUTPUT','.'))/'ThreeGuys_AI_Shorts.mp4'),'MP4 (*.mp4)')
         if not out: return
         options=dict(out_mp4=out,provider=self.provider.currentText(),voice_data=self.voice.currentData(),api_key=self.api_key.text().strip(),voice_rate=self.rate.value(),
             logo_path=self.logo,logo_w=self.lw.value(),logo_x=self.lx.value(),logo_y=self.ly.value(),effects=self.effects.isChecked(),banner=self.banner.isChecked(),
@@ -948,7 +950,7 @@ class Main(QMainWindow):
         if self.voice.count()==0:
             self.load_provider_voices()
             if self.voice.count()==0: return
-        out,_=QFileDialog.getSaveFileName(self,"완성 MP4 저장","ThreeGuys_Shorts.mp4","MP4 (*.mp4)")
+        out,_=QFileDialog.getSaveFileName(self,"완성 MP4 저장",str(Path(os.environ.get("THREEGUYS_OUTPUT","."))/"ThreeGuys_Shorts.mp4"),"MP4 (*.mp4)")
         if not out: return
         provider=self.provider.currentText(); data=self.voice.currentData(); key=self.api_key.text().strip()
         if provider=="Typecast" and not key:

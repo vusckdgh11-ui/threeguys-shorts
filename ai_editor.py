@@ -13,6 +13,7 @@ import cv2
 import requests
 
 DEFAULT_MODEL = 'gpt-4.1-mini'
+LOCAL_MODEL = 'ollama:qwen3-vl:2b'
 MAX_FRAMES = 1200
 WINDOW_SECONDS = 8.0
 
@@ -81,6 +82,58 @@ class VisionClient:
             return result
         except (ValueError,KeyError,TypeError):
             raise AIError('AI 응답 형식을 확인할 수 없습니다. 템플릿으로 대체하지 않고 중단합니다.') from None
+
+
+class LocalVisionClient:
+    """Ollama on loopback only. Never falls back to a paid provider."""
+    def __init__(self, model=LOCAL_MODEL, session=None):
+        self.model=model.removeprefix('ollama:')
+        if not self.model or 'cloud' in self.model.lower():
+            raise AIError('PC에 설치된 로컬 모델만 사용할 수 있습니다.')
+        self.session=session or requests.Session()
+        self.session.trust_env=False
+        self.calls=0
+
+    def ask(self, instruction, content, schema, name):
+        from local_runtime import ensure_server
+        ensure_server()
+        # Keep each timestamp next to its image in a separate message.
+        messages=[{'role':'system','content':instruction}]
+        pending=[]
+        for part in content:
+            if part['type']=='input_text': pending.append(part['text'])
+            elif part['type']=='input_image':
+                url=part['image_url']
+                if not url.startswith('data:image/jpeg;base64,'):
+                    raise AIError('로컬 AI에는 로컬 영상 프레임만 전달할 수 있습니다.')
+                messages.append({'role':'user','content':'\n'.join(pending),
+                                 'images':[url.split(',',1)[1]]})
+                pending=[]
+        if pending: messages.append({'role':'user','content':'\n'.join(pending)})
+        payload={'model':self.model,'messages':messages,'format':schema,
+                 'stream':False,'think':False,'keep_alive':'2m',
+                 'options':{'temperature':0.2,'num_ctx':8192,'num_predict':4096}}
+        try:
+            response=self.session.post('http://127.0.0.1:11435/api/chat',
+                                       json=payload,timeout=(10,1800))
+        except requests.RequestException:
+            raise AIError('PC AI 응답을 받지 못했습니다. 실행 중인 다른 프로그램을 닫아 메모리를 확보한 뒤 다시 시도하세요.') from None
+        self.calls+=1
+        if response.status_code!=200:
+            raise AIError(f'PC AI 실행 실패 (HTTP {response.status_code}). 모델 설치와 여유 메모리를 확인하세요. API로 전환하지 않았습니다.')
+        try:
+            data=response.json()
+            if not data.get('done') or data.get('done_reason')=='length': raise ValueError()
+            result=json.loads(data['message']['content'])
+            if not isinstance(result,dict): raise ValueError()
+            return result
+        except (ValueError,KeyError,TypeError):
+            raise AIError('PC AI의 응답 형식이 올바르지 않습니다. 편집을 중단했습니다. 다시 분석하거나 더 큰 로컬 모델이 필요할 수 있습니다.') from None
+
+
+def create_client(key, model):
+    if model.startswith('ollama:'): return LocalVisionClient(model)
+    return VisionClient(key, model)
 
 
 @dataclass

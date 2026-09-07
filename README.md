@@ -1,3 +1,13 @@
+## V4.2 무료 PC AI
+
+기본 모델은 `ollama:qwen3-vl:2b`입니다. API 키 없이 이 PC의 Ollama(127.0.0.1:11435)로 프레임을 분석합니다. 유료 API로 자동 전환하지 않습니다.
+
+Windows 설치 경로: 도구 `E:\Codex\Tools\Ollama`, 모델 `E:\Codex\Models`, 임시 파일 `E:\Codex\Temp`, 완성 영상 `E:\Codex\Output`. Ollama 초기 인증 설정만 사용자 `.ollama` 폴더에 생성될 수 있습니다. `THREEGUYS_ROOT`로 기본 루트를 변경할 수 있습니다.
+
+로컬 모델은 별도로 다운로드해야 합니다. 소형 모델의 장면 이해·한국어 대본 정확도는 온라인 모델과 같지 않습니다. CPU에서는 분석이 오래 걸리며 충분한 여유 RAM이 필요합니다. 샘플 프레임만 보므로 짧은 동작을 놓칠 수 있고 원본 음성을 인식하지 않습니다. 잘못된 시간·응답은 기존 검증에서 중단합니다.
+
+Windows 음성은 오프라인입니다. Google gTTS는 인터넷이 필요하고 Typecast는 별도 서비스입니다.
+
 # ThreeGuys Shorts V4.1 — 현장 이야기 AI 편집
 
 ## V4.1 수정 사항
