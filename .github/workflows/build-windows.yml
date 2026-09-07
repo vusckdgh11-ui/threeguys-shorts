@@ -30,8 +30,8 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Test timeline and Windows voice
-        run: python -m unittest -v test_sync test_ai test_logo test_local
+      - name: Test timeline, exchange and Windows voice
+        run: python -m unittest -v test_sync test_ai test_logo test_local test_codex_exchange
 
       - name: Test actual MP4 render
         env:

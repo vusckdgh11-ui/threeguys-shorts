@@ -3,6 +3,7 @@ from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import List
 import ai_editor
+import codex_exchange
 
 import cv2
 import numpy as np
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QImage, QPixmap, QFont, QColor, QPen, QBrush, QPainter, QFontDatabase
 
-APP_NAME = "ThreeGuys Shorts V4.2 · 무료 PC AI 편집"
+APP_NAME = "ThreeGuys Shorts V4.3 · 무료 Codex 분석"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 
 
@@ -399,6 +400,19 @@ class AIScriptWorker(QThread):
         finally: self.key=''
 
 
+class BundleWorker(QThread):
+    done=Signal(str,str); failed=Signal(str); status=Signal(int,str)
+    def __init__(self,options):
+        super().__init__(); self.options=options
+    def run(self):
+        try:
+            job,prompt=codex_exchange.export_job(*self.options,
+                progress=lambda p,s:self.status.emit(p,s))
+            self.done.emit(job,prompt)
+        except Exception as exc: self.failed.emit(str(exc))
+        finally: self.options=None
+
+
 class RenderWorker(QThread):
     done = Signal(str); failed = Signal(str); status = Signal(int, str)
     def __init__(self, args):
@@ -612,20 +626,15 @@ class Main(QMainWindow):
         self.desc.setPlaceholderText("현장 배경, 확인된 사실, 결과, 원하는 이야기 분위기를 적어주세요.\n예: 자살시도 후 생존 확인. 남은 현장을 정리한 작업. 안도감 있는 이야기.")
         f.addRow("현장 설명",self.desc)
         self.target=QComboBox(); self.target.addItems(["40","50","60"]); self.target.setCurrentText("50"); f.addRow("목표 길이",self.target)
-        self.analyze=QPushButton("1. AI 영상 인식 + 컷·대본 만들기"); self.analyze.clicked.connect(self.do_analyze); f.addRow(self.analyze); left.addWidget(g2)
-
-        ga=QGroupBox("영상 인식 AI 연결"); fa=QFormLayout(ga)
-        self.ai_key=QLineEdit(); self.ai_key.setEchoMode(QLineEdit.Password)
-        self.ai_key.setPlaceholderText("로컬 AI는 비워두세요 (유료 OpenAI 선택 시에만 필요)")
-        self.ai_key.setText(unprotect_secret(self.settings.value('vision_key_dpapi','')))
-        fa.addRow("AI API 키",self.ai_key)
-        self.ai_model=QLineEdit(ai_editor.LOCAL_MODEL); fa.addRow("AI 모델",self.ai_model)
+        self.analyze=QPushButton("1. 무료 Codex 분석자료 만들기"); self.analyze.clicked.connect(self.export_codex_job); f.addRow(self.analyze)
+        self.import_analysis=QPushButton("2. Codex 분석 결과 불러오기"); self.import_analysis.clicked.connect(self.import_codex_result); f.addRow(self.import_analysis)
         self.sample_step=QComboBox(); self.sample_step.addItem('정밀 · 0.5초마다',0.5); self.sample_step.addItem('기본 · 1초마다',1.0); self.sample_step.addItem('절약 · 2초마다',2.0); self.sample_step.setCurrentIndex(1)
-        fa.addRow("분석 간격",self.sample_step)
-        ai_note=QLabel("기본은 무료 PC AI입니다. ollama: 모델은 영상 프레임과 설명을 이 PC에서 처리합니다. CPU에서는 오래 걸릴 수 있습니다. 원본 음성은 분석하지 않으며 짧은 동작은 놓칠 수 있습니다. OpenAI 모델로 직접 변경할 때만 별도 API 키와 요금이 필요합니다.")
-        ai_note.setWordWrap(True); fa.addRow(ai_note)
-        self.ai_key_status=QLabel('키는 Windows 암호화 저장만 사용합니다.'); self.ai_key_status.setWordWrap(True); fa.addRow(self.ai_key_status)
-        forget=QPushButton('AI 키 저장 삭제'); forget.clicked.connect(self.forget_ai_key); fa.addRow(forget); left.addWidget(ga)
+        f.addRow("분석 간격",self.sample_step)
+        analysis_note=QLabel("API 키와 별도 API 요금 없이 사용합니다. 1번이 E:\\Codex\\AnalysisJobs에 장면 자료와 요청 문장을 만듭니다. Codex에서 분석한 뒤 2번으로 결과를 불러오세요. 원본 음성은 분석 자료에 포함되지 않습니다.")
+        analysis_note.setWordWrap(True); f.addRow(analysis_note); left.addWidget(g2)
+        # Retained internally only for compatibility with older saved projects.
+        self.ai_key=QLineEdit(); self.ai_model=QLineEdit(ai_editor.LOCAL_MODEL)
+        self.ai_key_status=QLabel()
 
         gt=QGroupBox("3) TTS 공급자 / 목소리"); ft=QFormLayout(gt)
         self.provider=QComboBox(); self.provider.addItems(["Windows 기본 음성","Google 무료(gTTS)","Typecast"]); self.provider.currentTextChanged.connect(self.provider_changed); ft.addRow("TTS",self.provider)
@@ -669,12 +678,12 @@ class Main(QMainWindow):
         sr=QHBoxLayout(); sr.addWidget(QLabel("대본 스타일")); self.script_style=QComboBox(); self.script_style.addItems(["강한 자극형","자극적","스토리형","정보형","차분한 전문형"]); self.script_style.setCurrentText("자극적"); sr.addWidget(self.script_style,1); gs.addLayout(sr)
         cr=QHBoxLayout(); cr.addWidget(QLabel("자막 스타일")); self.caption_style=QComboBox(); self.caption_style.addItems(["쇼츠 굵은 흰색+검정외곽선","핵심어 노랑 강조","핵심어 빨강 강조","깔끔한 흰색","검정 박스형"]); cr.addWidget(self.caption_style,1); gs.addLayout(cr)
         self.script=QTextEdit(); self.script.setMinimumHeight(220); self.script.setPlaceholderText("영상 분석 후 대본 만들기를 누르세요. 한 줄이 한 장면입니다."); gs.addWidget(self.script)
-        self.script_btn=QPushButton("2. 현재 컷을 AI가 다시 보고 대본 작성"); self.script_btn.setEnabled(False); self.script_btn.clicked.connect(self.do_script); gs.addWidget(self.script_btn)
+        self.script_btn=QPushButton("현재 컷을 AI가 다시 보고 대본 작성"); self.script_btn.setEnabled(False); self.script_btn.clicked.connect(self.do_script); self.script_btn.setVisible(False); gs.addWidget(self.script_btn)
         right.addWidget(g5)
 
         self.render=QPushButton("3. 컷별 TTS 동기화 후 MP4 자동 제작"); self.render.setEnabled(False); self.render.clicked.connect(self.do_render); self.render.setMinimumHeight(50); self.render.setStyleSheet("font-size:17px;font-weight:700"); right.addWidget(self.render); right.addStretch(1)
         self.auto_btn=QPushButton("AI 영상 인식부터 MP4까지 한 번에"); self.auto_btn.setMinimumHeight(52)
-        self.auto_btn.clicked.connect(self.do_auto); outer.addWidget(self.auto_btn)
+        self.auto_btn.clicked.connect(self.do_auto); self.auto_btn.setVisible(False); outer.addWidget(self.auto_btn)
 
         self.prog=QProgressBar(); outer.addWidget(self.prog); self.status=QLabel("준비됨"); outer.addWidget(self.status)
         splitter.setSizes([360,440,720]); splitter.setStretchFactor(0,0); splitter.setStretchFactor(1,0); splitter.setStretchFactor(2,1)
@@ -785,7 +794,7 @@ class Main(QMainWindow):
 
     def busy(self):
         return any(getattr(self, name, None) is not None and getattr(self, name).isRunning()
-                   for name in ('worker','rworker','voice_worker','ai_worker','script_worker'))
+                   for name in ('worker','rworker','voice_worker','ai_worker','script_worker','bundle_worker'))
 
     def closeEvent(self,event):
         if self.busy():
@@ -830,6 +839,51 @@ class Main(QMainWindow):
 
     def set_status(self,p,s): self.prog.setValue(p); self.status.setText(s)
 
+    def export_codex_job(self):
+        if self.busy(): return
+        if not self.paths:
+            QMessageBox.warning(self,"확인","먼저 원본 영상을 추가하세요."); return
+        root=Path(os.environ.get('THREEGUYS_ANALYSIS','E:/Codex/AnalysisJobs'))
+        self.invalidate_timeline(); self.set_edit_busy(True)
+        options=(list(self.paths),int(self.target.currentText()),self.desc.toPlainText(),
+                 self.script_style.currentText(),self.sample_step.currentData(),str(root))
+        self.bundle_worker=BundleWorker(options)
+        self.bundle_worker.status.connect(self.set_status)
+        self.bundle_worker.done.connect(self.codex_job_ready)
+        self.bundle_worker.failed.connect(self.fail)
+        self.bundle_worker.start()
+
+    def codex_job_ready(self,job,prompt):
+        self.set_edit_busy(False); self.settings.setValue('last_codex_job',job); self.settings.sync()
+        QApplication.clipboard().setText(prompt)
+        self.set_status(100,'Codex 분석자료 완료 — 요청 문장을 클립보드에 복사했습니다.')
+        try: os.startfile(job)
+        except Exception: pass
+        QMessageBox.information(self,'Codex 분석자료 완료',
+            f'폴더를 열고 Codex에 복사된 요청 문장을 붙여넣으세요.\n\n{job}\n\n'
+            'Codex가 analysis-result.json을 만들면 프로그램의 2번 버튼을 누르세요.')
+
+    def import_codex_result(self):
+        if self.busy(): return
+        last=self.settings.value('last_codex_job','E:/Codex/AnalysisJobs')
+        default=str(Path(last)/'analysis-result.json') if Path(last).is_dir() else str(last)
+        result_path,_=QFileDialog.getOpenFileName(self,'Codex 분석 결과 선택',default,'Codex result (analysis-result.json)')
+        if not result_path: return
+        try:
+            request,cuts=codex_exchange.import_result(result_path)
+        except Exception as exc:
+            QMessageBox.critical(self,'분석 결과 오류',str(exc)); return
+        self.segs=[Segment(c['path'],c['start'],c['end'],100,c['line'],
+                    visual_description=c['description'],selection_reason=c['reason'],
+                    visual_evidence=c['evidence'],scene_id=f'codex_{i:04d}')
+                   for i,c in enumerate(cuts)]
+        self.target.setCurrentText(str(request['target_seconds']))
+        self.script.setPlainText('\n'.join(s.line for s in self.segs))
+        self.refresh_table(); self.preview_slider.setRange(0,max(0,len(self.segs)-1))
+        self.preview_slider.setValue(0); self.show_preview_segment(0)
+        self.render.setEnabled(True); self.script_btn.setEnabled(False)
+        self.set_status(100,f'Codex 분석 결과 적용 완료 — {len(self.segs)}개 컷')
+
     def do_analyze(self):
         if self.busy(): return
         if not self.paths:
@@ -856,7 +910,7 @@ class Main(QMainWindow):
         self.ai_key.clear(); self.settings.remove('vision_key_dpapi'); self.settings.sync(); self.ai_key_status.setText('저장된 AI 키를 삭제했습니다.')
 
     def set_edit_busy(self,on):
-        self.analyze.setEnabled(not on); self.auto_btn.setEnabled(not on)
+        self.analyze.setEnabled(not on); self.import_analysis.setEnabled(not on); self.auto_btn.setEnabled(not on)
         self.script_btn.setEnabled(not on and bool(self.segs)); self.render.setEnabled(not on and bool(self.segs) and all(s.line for s in self.segs))
         self.script.setReadOnly(on)
 

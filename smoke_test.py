@@ -78,7 +78,7 @@ def run_checks(app, report_path):
                 secret=app.protect_secret("local-self-test")
                 assert secret and app.unprotect_secret(secret)=="local-self-test"
             report={"status":"passed","duration_seconds":expected,"resolution":"1080x1920",
-                    "ai_module_import":"passed","live_ai_api":"not tested: user API key required",
+                    "ai_module_import":"passed","codex_exchange":"validated separately; no API key required",
                     "checks":["selected source bounds","three TTS boundaries","short audio padding",
                               "burn-in render","logo geometry and overlay","bundled FFmpeg","DPAPI"]}
     except Exception as exc:
